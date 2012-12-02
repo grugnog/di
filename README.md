@@ -9,6 +9,10 @@ Installation
 
 ```bash
 sudo apt-get install git puppet
-git init && git remote add --track master origin git://github.com/grugnog/di.git && git pull
+git init
+git remote add --track master origin git://github.com/grugnog/di.git
+git pull
+git submodule init
+git submodule update --recursive
 sudo puppet apply --confdir=~/.puppet ~/.puppet/manifests/manifest.pp
 ```
