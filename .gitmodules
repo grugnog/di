@@ -22,6 +22,6 @@
 [submodule "drush"]
 	path = drush
 	url = http://git.drupal.org/project/drush.git
-[submodule "drupal"]
-	path = drupal
+[submodule "docroot"]
+	path = docroot
 	url = http://git.drupal.org/project/drupal.git
