@@ -19,3 +19,9 @@
 [submodule ".puppet/modules/firewall"]
 	path = .puppet/modules/firewall
 	url = git://github.com/example42/puppet-firewall.git
+[submodule "drush"]
+	path = drush
+	url = http://git.drupal.org/project/drush.git
+[submodule "drupal"]
+	path = drupal
+	url = http://git.drupal.org/project/drupal.git
