@@ -18,3 +18,13 @@ php::pecl::module { "xhprof":
   use_package => no,
   preferred_state => "beta",
 }
+apache::vhost { 'localhost':
+  docroot  => '/home/drupal/docroot',
+}
+percona::database { 'drupal':
+  ensure => present;
+}
+percona::rights {'drupal@localhost/drupal':
+  priv => 'all',
+  password => 'drupal',
+}
