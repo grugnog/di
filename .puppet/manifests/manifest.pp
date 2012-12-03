@@ -7,6 +7,8 @@ class { 'percona':
 }
 class {'apache': }
 class { 'php': }
+php::module { "gd": }
+php::module { "mysql": }
 php::module { 'pear':
   module_prefix => "php-",
 }
@@ -28,3 +30,4 @@ percona::rights {'drupal@localhost/drupal':
   priv => 'all',
   password => 'drupal',
 }
+
