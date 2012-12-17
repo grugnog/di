@@ -1,0 +1,6 @@
+browser=Chrome
+url=http://s3.amazonaws.com/wpt-software/chrome_22.msi
+md5=2CE4CAA3571924E29B3565F1A269DB30
+version=22.0.1229.92
+command=Msiexec /q /I chrome_22.msi
+update=0
