@@ -1,0 +1,6 @@
+This module is simply a clone of the Example42 apache puppet module, to allow managing multiple Apache instances, since puppet enforces only a single instance of a class. The better way to do this would be to refactor the Example42 module to use a define rather than a class.
+
+To update (on neccessary when updating the apache module) it run the following:
+cd ~/.puppet/modules
+rm -rf wpt
+module_clone.sh -m apache -n wpt

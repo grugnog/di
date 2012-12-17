@@ -25,3 +25,6 @@
 [submodule "docroot"]
 	path = docroot
 	url = http://git.drupal.org/project/drupal.git
+[submodule ".puppet/tools"]
+	path = .puppet/tools
+	url = git://github.com/example42/Example42-tools.git
