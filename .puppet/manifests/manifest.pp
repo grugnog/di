@@ -44,6 +44,7 @@ exec { 'apache_instance_wpt':
 }
 Exec['apache_instance_wpt'] -> apache::vhost['drupal']
 file['000-default'] -> Exec['apache_instance_wpt']
+Class['php'] -> Exec['apache_instance_wpt']
 Exec['apache_instance_wpt'] -> file['wpt_ports.conf']
 Exec['apache_instance_wpt'] -> wpt::vhost['wpt']
 class {'wpt':
