@@ -1,0 +1,6 @@
+browser=Firefox
+url=http://s3.amazonaws.com/wpt-software/firefox_17.exe
+md5=DBC8337BB2733EA8BBBC7062EBD2DCA2
+version=17
+command=firefox_17.exe -ms
+update=1

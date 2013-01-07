@@ -69,7 +69,7 @@ file { "wpt_ports.conf":
   audit   => $wpt::manage_audit,
 }
 wpt::vhost { 'wpt': 
-  docroot => '/home/drupal/wpt/www',
+  docroot => '/home/drupal/webpagetest/www',
   port => '8888',
 }
 # Test agent specific
