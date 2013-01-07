@@ -69,13 +69,16 @@ file { "wpt_ports.conf":
   content => template('wpt_ports.conf'),
   audit   => $wpt::manage_audit,
 }
-# WPT also requires gd, declared above.
-php::module { ['zip', 'zlib', 'curl']: }
+# WPT also requires gd, declared above and zlib/zip which is built in.
+php::module { ['curl']: }
 wpt::vhost { 'wpt': 
-  docroot => '/home/drupal/webpagetest/www',
+  docroot => '/home/drupal/webpagetest/www/webpagetest',
   port => '8888',
 }
 # Test agent specific
+exec { 'default_shell':
+  command => 'echo "set dash/sh false" | debconf-communicate && dpkg-reconfigure dash -pcritical'
+}
 apt::source { 'chrome':
   location => 'http://dl.google.com/linux/chrome/deb/',
   repos => 'main',
