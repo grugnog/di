@@ -7,15 +7,11 @@ class { 'percona':
 }
 class {'apache': }
 class { 'php': }
-php::module { "gd": }
-php::module { "mysql": }
-php::module { 'pear':
+apache::module{ ['expires', 'headers', 'rewrite']: }
+php::module { ['gd', 'mysql', 'xdebug']: }
+php::module { ['pear', 'apc']:
   module_prefix => "php-",
 }
-php::module { 'apc':
-  module_prefix => "php-",
-}
-php::module { 'xdebug': }
 php::pecl::module { "xhprof":
   use_package => no,
   preferred_state => "beta",
@@ -36,12 +32,17 @@ percona::rights {'drupal@localhost/drupal':
   priv => 'all',
   password => 'drupal',
 }
+
 # WPT server specific
+package {'ffmpeg':
+  ensure => 'installed'
+}
 exec { 'apache_instance_wpt':
   command => '/usr/bin/sudo /bin/sh /usr/share/doc/apache2.2-common/examples/setup-instance wpt',
   onlyif => 'test ! -d /etc/apache2-wpt',
   require => Package['apache'],
 }
+# Ordering rules
 Exec['apache_instance_wpt'] -> apache::vhost['drupal']
 file['000-default'] -> Exec['apache_instance_wpt']
 Class['php'] -> Exec['apache_instance_wpt']
@@ -68,6 +69,8 @@ file { "wpt_ports.conf":
   content => template('wpt_ports.conf'),
   audit   => $wpt::manage_audit,
 }
+# WPT also requires gd, declared above.
+php::module { ['zip', 'zlib', 'curl']: }
 wpt::vhost { 'wpt': 
   docroot => '/home/drupal/webpagetest/www',
   port => '8888',
