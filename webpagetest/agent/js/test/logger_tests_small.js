@@ -51,7 +51,7 @@ describe('logger small', function() {
     });
   });
 
-  it('should output to the error, warn, info, and honor max logging level',
+  it('should be able to output to the error, warn, info, and log consoles zzz',
       function() {
     var lines = [];
     Object.keys(logger.LEVELS).forEach(function(levelName) {

@@ -42,20 +42,14 @@ WebInspector.TimelineModel = function()
     WebInspector.timelineManager.addEventListener(WebInspector.TimelineManager.EventTypes.TimelineEventRecorded, this._onRecordAdded, this);
 }
 
-    WebInspector.TimelineModel.RecordType = {
+WebInspector.TimelineModel.RecordType = {
     Root: "Root",
-    Program: "Program",
     EventDispatch: "EventDispatch",
 
     BeginFrame: "BeginFrame",
-    ScheduleStyleRecalculation: "ScheduleStyleRecalculation",
-    RecalculateStyles: "RecalculateStyles",
-    InvalidateLayout: "InvalidateLayout",
     Layout: "Layout",
+    RecalculateStyles: "RecalculateStyles",
     Paint: "Paint",
-    ScrollLayer: "ScrollLayer",
-    DecodeImage: "DecodeImage",
-    ResizeImage: "ResizeImage",
     CompositeLayers: "CompositeLayers",
 
     ParseHTML: "ParseHTML",
@@ -68,12 +62,10 @@ WebInspector.TimelineModel = function()
     XHRLoad: "XHRLoad",
     EvaluateScript: "EvaluateScript",
 
+    TimeStamp: "TimeStamp",
+
     MarkLoad: "MarkLoad",
     MarkDOMContent: "MarkDOMContent",
-
-    TimeStamp: "TimeStamp",
-    Time: "Time",
-    TimeEnd: "TimeEnd",
 
     ScheduleResourceRequest: "ScheduleResourceRequest",
     ResourceSendRequest: "ResourceSendRequest",

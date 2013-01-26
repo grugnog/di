@@ -30,8 +30,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 var events = require('events');
 var http = require('http');
 var url = require('url');
+var util = require('util');
 var logger = require('logger');
-exports.WebSocket = require('ws');  // Allow to stub out in tests.
+var WebSocket = require('ws');
 
 exports.PREFIX_NETWORK = 'Network.';
 exports.PREFIX_PAGE = 'Page.';
@@ -64,75 +65,74 @@ function DevTools(devToolsUrl) {
   this.ws_ = undefined;
   this.commandId_ = 0;
   this.commandCallbacks_ = {};
-  this.messageCallback_ = function() {};
 }
+util.inherits(DevTools, events.EventEmitter);
 exports.DevTools = DevTools;
 
-DevTools.prototype.onMessage = function(callback) {
+DevTools.prototype.connect = function() {
   'use strict';
-  this.messageCallback_ = callback;
-};
-
-  DevTools.prototype.connect = function(callback, errback) {
-  'use strict';
-  http.get(url.parse(this.devToolsUrl_), function(response) {
+  var self = this;  // For closure
+  http.get(url.parse(self.devToolsUrl_), function(response) {
     exports.ProcessResponse(response, function(responseBody) {
       var devToolsJson = JSON.parse(responseBody);
       try {
-        this.debuggerUrl_ = devToolsJson[0].webSocketDebuggerUrl;
+        self.debuggerUrl_ = devToolsJson[0].webSocketDebuggerUrl;
       } catch (e) {
-        throw new Error('DevTools response at ' + this.devToolsUrl_ +
+        throw new Error('DevTools response at ' + self.devToolsUrl_ +
             ' does not contain webSocketDebuggerUrl: ' + responseBody);
       }
-      this.connectDebugger_(callback, errback);
-    }.bind(this));
-  }.bind(this));
+      self.connectDebugger_();
+    });
+  });
 };
 
-DevTools.prototype.connectDebugger_ = function(callback, errback) {
+DevTools.prototype.connectDebugger_ = function() {
   'use strict';
+  var self = this;  // For closure
   // TODO(klm): do we actually need origin?
-  var ws = new exports.WebSocket(this.debuggerUrl_, {'origin': 'WebPageTest'});
+  var ws = new WebSocket(this.debuggerUrl_, {'origin': 'WebPageTest'});
 
   ws.on('error', function(e) {
-    errback(e);
+    throw e;
   });
 
   ws.on('open', function() {
     logger.extra('WebSocket connected: ' + JSON.stringify(ws));
-    this.ws_ = ws;
-    callback(this);
-  }.bind(this));
+    self.ws_ = ws;
+    self.emit('connect');
+  });
 
   ws.on('message', function(data, flags) {
     // flags.binary will be set if a binary data is received
     // flags.masked will be set if the data was masked
     var callbackErrback;
     if (!flags.binary) {
-      var message = JSON.parse(data);
-      if (message.result && message.id) {
-        callbackErrback = this.commandCallbacks_[message.id];
+      var messageJson = JSON.parse(data);
+      if (messageJson.result && messageJson.id) {
+        callbackErrback = self.commandCallbacks_[messageJson.id];
         if (callbackErrback) {
-          delete this.commandCallbacks_[message.id];
+          delete self.commandCallbacks_[messageJson.id];
           if (callbackErrback.callback) {
-            callbackErrback.callback(message.result);
+            callbackErrback.callback(messageJson.result);
           }
         }
-      } else if (message.error && message.id) {
-        callbackErrback = this.commandCallbacks_[message.id];
+        self.emit('result', messageJson.id, messageJson.result);
+      } else if (messageJson.error && messageJson.id) {
+        callbackErrback = self.commandCallbacks_[messageJson.id];
         if (callbackErrback) {
-          delete this.commandCallbacks_[message.id];
+          delete self.commandCallbacks_[messageJson.id];
           if (callbackErrback.errback) {
-            callbackErrback.errback(message.result);
+            callbackErrback.errback(messageJson.result);
           }
         }
+        //self.emit('error', messageJson.id, messageJson.error);
       } else {
-        this.messageCallback_(message);
+        self.emit('message', messageJson);
       }
     } else {
       throw new Error('Unexpected binary WebSocket message');
     }
-  }.bind(this));
+  });
 };
 
 DevTools.prototype.command = function(command, callback, errback) {
@@ -149,17 +149,17 @@ DevTools.prototype.command = function(command, callback, errback) {
   return command.id;
 };
 
-DevTools.prototype.networkCommand = function(method, callback, errback) {
+DevTools.prototype.networkMethod = function(method, callback, errback) {
   'use strict';
   this.command({method: exports.PREFIX_NETWORK + method}, callback, errback);
 };
 
-DevTools.prototype.pageCommand = function(method, callback, errback) {
+DevTools.prototype.pageMethod = function(method, callback, errback) {
   'use strict';
   this.command({method: exports.PREFIX_PAGE + method}, callback, errback);
 };
 
-DevTools.prototype.timelineCommand = function(method, callback, errback) {
+DevTools.prototype.timelineMethod = function(method, callback, errback) {
   'use strict';
   this.command({method: exports.PREFIX_TIMELINE + method}, callback, errback);
 };

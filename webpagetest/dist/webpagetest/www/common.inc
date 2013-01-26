@@ -1,7 +1,7 @@
 <?php
 // if any query parameter includes a .., exit right away - likely a hack attempt
 foreach($_REQUEST as $key => $val) {
-    if (is_string($val) && strlen($val) && strpos($val, '/../') !== false) {
+    if (strlen($val) && strpos($val, '/../') !== false) {
         header('HTTP/1.1 403 Forbidden');
         echo "<html><body>Sorry, the request was blocked, please contact us for details";
         echo "<br>" . htmlspecialchars($key) . " - " . htmlspecialchars($val) . "</body></html>";
@@ -1236,7 +1236,8 @@ function RestoreTest($id)
                     (array_key_exists('restored', $testInfo) && 
                     $testInfo['restored'] && 
                     array_key_exists('restoredDataOnly', $testInfo) &&
-                    $testInfo['restoredDataOnly']) )
+                    $testInfo['restoredDataOnly'] && 
+                    !defined('RESTORE_DATA_ONLY')) )
                     $restore = true;
             }
             else
@@ -1368,31 +1369,11 @@ function GetTesterCount($location)
 function AddJobFile($workDir, $file, $priority, $queue_limit = 0)
 {
     $ret = false;
-    if (LoadJobQueue($workDir, $queue)) {
+    if( LoadJobQueue($workDir, $queue) )
+    {
         if( !$queue_limit || count($queue[$priority]) < $queue_limit )
             if( array_push($queue[$priority], $file) )
                 $ret = SaveJobQueue($workDir, $queue);
-    }
-    return $ret;
-}
-
-/**
-* Add a job to the front of the work queue (assume it is locked)
-*/
-function AddJobFileHead($workDir, $file, $priority, $queue_limit = 0)
-{
-    $ret = false;
-    if (LoadJobQueue($workDir, $queue)) {
-        if( !$queue_limit || count($queue[$priority]) < $queue_limit ) {
-            // we actually want to insert it as the second test if there is already a queue
-            if (count($queue[$priority]))
-                $first = array_shift($queue[$priority]);
-            if (array_unshift($queue[$priority], $file)) {
-                if (isset($first))
-                    array_unshift($queue[$priority], $first);
-                $ret = SaveJobQueue($workDir, $queue);
-            }
-        }
     }
     return $ret;
 }

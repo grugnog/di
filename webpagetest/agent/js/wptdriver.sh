@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 server=http://localhost:8888
 location=Test

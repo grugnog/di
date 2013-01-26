@@ -99,13 +99,14 @@ function SandboxedDriver(driver, wdSandbox, sandboxedDriverListener) {
     wdSandbox.promise.Application.getInstance().schedule(
         'onBeforeDriverAction: ' + description, function() {
       sandboxedDriverListener.onBeforeDriverAction(
-          command, commandArgs);
+          driver, command, commandArgs);
     });
     return realSchedule.apply(driver, arguments).then(function(result) {
-      sandboxedDriverListener.onAfterDriverAction(command, commandArgs, result);
+      sandboxedDriverListener.onAfterDriverAction(
+          driver, command, commandArgs, result);
       return result;  // Don't mess with the result.
     }, function(e) {
-      sandboxedDriverListener.onAfterDriverError(command, arguments, e);
+      sandboxedDriverListener.onAfterDriverError(driver, command, arguments, e);
     });
   };
 
@@ -140,11 +141,7 @@ exports.createSandboxedWdNamespace = function(
     serverUrl, capabilities, sandboxedDriverListener) {
   'use strict';
   return exports.createSandboxedWebDriverModule().then(function(wdSandbox) {
-    var builder = new wdSandbox.Builder()
-        .usingServer(serverUrl)
-        .withCapabilities(capabilities);
-    var builtDriver = null;
-    var sandboxedDriver = null;
+    var isDriverBuilt = false;
 
     /**
      * A proxy for restricting access to Builder operations.
@@ -158,6 +155,9 @@ exports.createSandboxedWdNamespace = function(
       // leak our promise system into theirs. They'd play well
       // together, but you'd end up with weird synchronization
       // issues.  Avoiding those is the whole point of all this!
+      var builder = new wdSandbox.Builder()
+          .usingServer(serverUrl)
+          .withCapabilities(capabilities);
       var methodName;
       for (methodName in builder) {
         if (typeof builder[methodName] === 'function') {
@@ -165,16 +165,14 @@ exports.createSandboxedWdNamespace = function(
         }
       }
 
-      // The driver is a singleton across
       this.build = function() {
-        if (!builtDriver) {
-          builtDriver = builder.build();
-          sandboxedDriver = new SandboxedDriver(
-              builtDriver, wdSandbox, sandboxedDriverListener);
+        if (isDriverBuilt) {
+          throw new Error('You may only create one driver');
         }
-        sandboxedDriverListener.onDriverBuild(
-            builtDriver, capabilities, wdSandbox);
-        return sandboxedDriver;
+        var builtWd = builder.build();
+        isDriverBuilt = true;
+        sandboxedDriverListener.onDriverBuild(builtWd, capabilities, wdSandbox);
+        return new SandboxedDriver(builtWd, wdSandbox, sandboxedDriverListener);
       };
     }
 

@@ -184,38 +184,42 @@ if( array_key_exists('video', $_REQUEST) && $_REQUEST['video'] )
         }
         
         // make sure the test result is valid, otherwise re-run it
-        if ($done && !$har && !$pcap && isset($testInfo) &&
-            array_key_exists('job_file', $testInfo) && 
-            array_key_exists('max_retries', $testInfo) && 
-            $testInfo['max_retries'] > 1) {
+        if ($done && !$har && !$pcap && isset($testInfo) && array_key_exists('job_file', $testInfo)) {
             $testfile = null;
-            $valid = true;
-            $available_runs = 0;
-            $expected_runs = $testInfo['runs'];
-            if (!$testInfo['fvonly'])
-                $expected_runs = $expected_runs * 2;
+            $valid = false;
             $files = scandir($testPath);
             foreach ($files as $file) {
-                if (stripos($file, 'IEWPG'))
-                    $available_runs++;
-                if ($file == 'test.job')
+                if (stripos($file, 'IEWPG')) {
+                    $valid = true;
+                }
+                if (preg_match('/.*\.test$/', $file)) {
                     $testfile = "$testPath/$file";
+                }
             }
-            if ($available_runs < $expected_runs)
-                $valid = false;
-            if (!array_key_exists('retries', $testInfo))
+            if (!array_key_exists('retries', $testInfo)) {
                 $testInfo['retries'] = 0;
-            if (!$valid && $testInfo['retries'] < $testInfo['max_retries'] && isset($testfile)) {
-                if ($lock = LockLocation($location)) {
-                    if (copy($testfile, $testInfo['job_file'])) {
-                        ResetTestDir($testPath);
-                        $testInfo['retries']++;
-                        AddJobFileHead($testInfo['workdir'], $testInfo['job'], $testInfo['priority'], 0);
-                        $done = false;
-                        unset($testInfo['started']);
-                        $testInfo_dirty = true;
+            }
+            if (array_key_exists('max_retries', $testInfo)) {
+                $testInfo['max_retries'] = min($testInfo['max_retries'], 10);
+                if ($valid) {
+                    require_once 'page_data.inc';
+                    $pageData = loadAllPageData($testPath);
+                    $count = CountSuccessfulTests($pageData, 0);
+                    if ($count < 1) {
+                        $valid = false;
                     }
-                    UnlockLocation($lock);
+                }
+            } else {
+                $testInfo['max_retries'] = 1;
+            }
+            if (!$valid && $testInfo['retries'] < $testInfo['max_retries'] && isset($testfile)) {
+                // re-submit the test (move the test file so we only try this once)
+                if (copy($testfile, $testInfo['job_file'])) {
+                    $testInfo['retries']++;
+                    AddJobFile($testInfo['work_dir'], $testInfo['job'], $testInfo['priority'], 0);
+                    $done = false;
+                    unset($testInfo['started']);
+                    $testInfo_dirty = true;
                 }
             }
         }
@@ -767,7 +771,6 @@ function ProcessHARText($testPath, $harIsFromSinglePageLoad)
                 // Read and parse the json HAR file
                 $parsedHar = json_decode(file_get_contents("{$testPath}/{$file}"), true);
                 gz_compress("{$testPath}/{$file}");
-                unlink("{$testPath}/{$file}");
                 if (!$parsedHar)
                 {
                     logMalformedInput("Failed to parse json file '{$file}'");
@@ -887,7 +890,7 @@ function ProcessHARData($parsedHar, $testPath, $harIsFromSinglePageLoad) {
     foreach ($parsedHar['log']['pages'] as $pagecount => $page)
     {
         $pageref = $page['id'];
-        $curPageData = array();
+        $curPageData;
 
         // Extract direct page data and save in data array
         $curPageData["url"] = $page['title'];
@@ -1073,7 +1076,6 @@ function ProcessHARData($parsedHar, $testPath, $harIsFromSinglePageLoad) {
 
         // Store the data for the next loops
         $pageData[$pageref] = $curPageData;
-        unset($curPageData);
     }
 
     // Iterate the entries
@@ -1532,20 +1534,4 @@ function RemoveSensitiveHeaders($file) {
     file_put_contents($file, $data);
 }
 
-/**
-* Reset the state of the given test directory (delete all the results)
-* 
-* @param mixed $testDir
-*/
-function ResetTestDir($testPath) {
-    $files = scandir($testPath);
-    foreach ($files as $file) {
-        if ($file != '.' && $file != '..' && strncasecmp($file, 'test', 4)) {
-            if (is_file("$testPath/$file"))
-                unlink("$testPath/$file");
-            elseif (is_dir("$testPath/$file"))
-                delTree("$testPath/$file");
-        }
-    }
-}
 ?>

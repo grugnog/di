@@ -1154,6 +1154,10 @@ function SubmitUrl($testId, $testData, &$test, $url)
     global $error;
     global $locations;
     
+    // make sure the work directory exists
+    if( !is_dir($test['workdir']) )
+        mkdir($test['workdir'], 0777, true);
+    
     $out = "Test ID=$testId\r\nurl=";
     if( !strlen($test['script']) )
         $out .= $url;
@@ -1181,7 +1185,7 @@ function SubmitUrl($testId, $testData, &$test, $url)
                 if( stripos($script, '%HOSTR%') !== false )
                 {
                     // do host substitution but also clone the command for a final redirected domain if there are redirects involved
-                    if( GetRedirect($url, $rhost, $rurl) )
+                    if( GetRedirectHost($url, $rhost) )
                     {
                         $lines = explode("\r\n", $script);
                         $script = '';
@@ -1233,10 +1237,7 @@ function WriteJob($location, &$test, &$job, $testId)
     }
     else
     {
-        // make sure the work directory exists
-        if( !is_dir($test['workdir']) )
-            mkdir($test['workdir'], 0777, true);
-        $workDir = $test['workdir'];
+        $workDir = $locations[$location]['localDir'];
         $lockFile = fopen( "./tmp/$location.lock", 'w',  false);
         if( $lockFile )
         {
@@ -1244,17 +1245,19 @@ function WriteJob($location, &$test, &$job, $testId)
             {
                 $fileName = $test['job'];
                 $file = "$workDir/$fileName";
-                if( file_put_contents($file, $job) ) {
-                    if (AddJobFile($workDir, $fileName, $test['priority'], $test['queue_limit'])) {
+                if( file_put_contents($file, $job) )
+                {
+                    if( AddJobFile($workDir, $fileName, $test['priority'], $test['queue_limit']) )
+                    {
                         // store a copy of the job file with the original test in case the test fails and we need to resubmit it
-                        $test['job_file'] = realpath($file);
-                        if (ValidateTestId($testId)) {
-                            $testPath = GetTestPath($testId);
-                            if (strlen($testPath)) {
-                                $testPath = './' . $testPath;
-                                if (!is_dir($testPath))
-                                    mkdir($testPath, 0777, true);
-                                file_put_contents("$testPath/test.job", $job);
+                        $test['work_dir'] = $workDir;
+                        $test['job_file'] = $file;
+                        $testPath = GetTestPath($testId);
+                        if (ValidateTestId($testId) && strlen($testPath)) {
+                            $testPath = './' . $testPath;
+                            if (!is_dir($testPath)) {
+                                mkdir($testPath, 0777, true);
+                                file_put_contents("$testPath/$fileName.test", $job);
                             }
                         }
                         $tests = json_decode(file_get_contents("./tmp/$location.tests"), true);
@@ -1347,46 +1350,43 @@ function SendToRelay(&$test, &$out)
 /**
 * Detect if the given URL redirects to another host
 */
-function GetRedirect($url, &$rhost, &$rurl)
+function GetRedirectHost($url, &$rhost)
 {
-    global $redirect_cache;
     $redirected = false;
-    $rhost = '';
-    $rurl = '';
-    
-    if (strlen($url)) {
-        if (array_key_exists($url, $redirect_cache)) {
-            $rhost = $redirect_cache[$url]['host'];
-            $rurl = $redirect_cache[$url]['url'];
-        } else {
-            $opts = array('http' =>
-                array('user_agent' => 'Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1; Trident/4.0; PTST 2.295)',
-                        'ignore_errors' => TRUE,
-                        'protocol_version' => 1.1,
-                        'timeout' => 20)
-            );
-            stream_context_get_default($opts);
-            $headers = get_headers($url,1);
-            if( isset($headers['Location']) ) {
-                $parts = parse_url($url);
-                $original = $parts['host'];
+    $opts = array('http' =>
+        array('user_agent' => 'Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1; Trident/4.0; PTST 2.295)',
+                'ignore_errors' => TRUE,
+                'protocol_version' => 1.1,
+                'timeout' => 20)
+    );
+    stream_context_get_default($opts);
+        
+    // fetch the actual content
+    $headers = get_headers($url,1);
 
-                $location = $headers['Location'];
-                if( is_array($location) )
-                    $rurl = $location[count($location) - 1];
-                elseif( strlen($location) )
-                    $rurl = $location;
-                $parts = parse_url($rurl);
-                $host = trim($parts['host']);
-                
-                if( strlen($host) && $original !== $host )
-                    $rhost = $host;
-            }
-            $redirect_cache[$url] = array('host' => $rhost, 'url' => $rurl);
+    if( isset($headers['Location']) )
+    {
+        $parts = parse_url($url);
+        $original = $parts['host'];
+
+        $location = $headers['Location'];
+        if( is_array($location) )
+        {
+            $parts = parse_url($location[count($location) - 1]);
+            $final = trim($parts['host']);
+        }
+        elseif( strlen($location) )
+        {
+            $parts = parse_url($location);
+            $final = trim($parts['host']);
+        }
+        
+        if( strlen($final) && $original !== $final )
+        {
+            $rhost = $final;
+            $redirected = true;
         }
     }
-    if (strlen($rhost))
-        $redirected = true;
     return $redirected;
 }
 
@@ -1467,17 +1467,13 @@ function CheckUrl($url)
 {
     $ok = true;
     $blockUrls = file('./settings/blockurl.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    if ($blockUrls !== false && count($blockUrls)) {
-        GetRedirect($url, $rhost, $rurl);
-        foreach( $blockUrls as $block ) {
-            $block = trim($block);
-            if( strlen($block) && 
-                (preg_match("/$block/i", $url) ||
-                 (strlen($rurl) && 
-                  preg_match("/$block/i", $rurl)))) {
-                $ok = false;
-                break;
-            }
+    foreach( $blockUrls as $block )
+    {
+        $block = trim($block);
+        if( strlen($block) && preg_match("/$block/i", $url) )
+        {
+            $ok = false;
+            break;
         }
     }
     

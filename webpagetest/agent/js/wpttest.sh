@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 export WPT_SERVER=http://localhost:8888
 export LOCATION=Test
