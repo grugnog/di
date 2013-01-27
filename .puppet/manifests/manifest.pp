@@ -96,8 +96,8 @@ apt::source { 'chrome':
   repos => 'main',
   release => 'stable',
   include_src => false,
-  key         => "7FAC5991",
-  key_source  => "https://dl-ssl.google.com/linux/linux_signing_key.pub",
+  key => "A040830F7FAC5991",
+  key_server => "subkeys.pgp.net",
 }
 package { 'xvfb':
   ensure => present,
