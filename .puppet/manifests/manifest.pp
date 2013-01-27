@@ -55,13 +55,13 @@ exec { 'apache_instance_wpt':
   require => Package['apache'],
 }
 # Ordering rules - first common config
-file['000-default'] -> Exec['apache_instance_wpt']
+File['000-default'] -> Exec['apache_instance_wpt']
 Class['php'] -> Exec['apache_instance_wpt']
 # Specific config
-Exec['apache_instance_wpt'] -> file['wpt_ports.conf']
-Exec['apache_instance_wpt'] -> wpt::vhost['wpt']
-Exec['apache_instance_wpt'] -> file['apache_ports.conf']
-Exec['apache_instance_wpt'] -> apache::vhost['drupal']
+Exec['apache_instance_wpt'] -> File['wpt_ports.conf']
+Exec['apache_instance_wpt'] -> Wpt::Vhost['wpt']
+Exec['apache_instance_wpt'] -> File['apache_ports.conf']
+Exec['apache_instance_wpt'] -> Apache::Vhost['drupal']
 class {'wpt':
   package => 'apache2-mpm-prefork', # This is hacky, but saves having to edit the module.
   service => 'apache2-wpt',
