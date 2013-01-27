@@ -7,8 +7,10 @@ class { 'percona':
   require => Class['percona::repo::apt'],
 }
 class {'apache': }
-class { 'php': }
-apache::module{ ['expires', 'headers', 'rewrite']: }
+class { 'php':
+  require => Class['percona'],
+}
+apache::module { ['expires', 'headers', 'rewrite']: }
 php::module { ['gd', 'mysql', 'xdebug']: }
 php::module { ['pear', 'apc']:
   module_prefix => "php-",
