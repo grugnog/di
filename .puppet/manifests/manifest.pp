@@ -1,11 +1,10 @@
 Exec { path => "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
-#class { 'apt': }
-#class { 'percona::repo::apt': }
-class {
-  'apt':;
-  'percona':
-    server => true,
-    percona_version => '5.5',
+class { 'apt': }
+class { 'percona::repo::apt': }
+class { 'percona':
+  server => true,
+  percona_version => '5.5',
+  require => Class['percona::repo::apt'],
 }
 class {'apache': }
 class { 'php': }
@@ -97,7 +96,8 @@ apt::source { 'chrome':
   repos => 'main',
   release => 'stable',
   include_src => false,
-  key_source => 'http://www.google.com/linuxrepositories/',
+  key         => "7FAC5991",
+  key_source  => "https://dl-ssl.google.com/linux/linux_signing_key.pub",
 }
 package { 'xvfb':
   ensure => present,
