@@ -25,6 +25,17 @@ file { '000-default':
 apache::vhost { 'drupal':
   docroot  => '/home/drupal/drupal',
 }
+file { "apache_ports.conf":
+  ensure  => 'present',
+  path    => "${apache::config_dir}/ports.conf",
+  mode    => $apache::config_file_mode,
+  owner   => $apache::config_file_owner,
+  group   => $apache::config_file_group,
+  require => Package['apache'],
+  notify  => $apache::manage_service_autorestart,
+  content => template('apache_ports.conf'),
+  audit   => $apache::manage_audit,
+}
 percona::database { 'drupal':
   ensure => present,
 }
@@ -38,16 +49,18 @@ package {'ffmpeg':
   ensure => 'installed'
 }
 exec { 'apache_instance_wpt':
-  command => '/usr/bin/sudo /bin/sh /usr/share/doc/apache2.2-common/examples/setup-instance wpt',
+  command => '/bin/sh /usr/share/doc/apache2.2-common/examples/setup-instance wpt',
   onlyif => 'test ! -d /etc/apache2-wpt',
   require => Package['apache'],
 }
-# Ordering rules
-Exec['apache_instance_wpt'] -> apache::vhost['drupal']
+# Ordering rules - first common config
 file['000-default'] -> Exec['apache_instance_wpt']
 Class['php'] -> Exec['apache_instance_wpt']
+# Specific config
 Exec['apache_instance_wpt'] -> file['wpt_ports.conf']
 Exec['apache_instance_wpt'] -> wpt::vhost['wpt']
+Exec['apache_instance_wpt'] -> file['apache_ports.conf']
+Exec['apache_instance_wpt'] -> apache::vhost['drupal']
 class {'wpt':
   package => 'apache2-mpm-prefork', # This is hacky, but saves having to edit the module.
   service => 'apache2-wpt',
@@ -56,7 +69,6 @@ class {'wpt':
   pid_file => '/var/run/apache2-wpt.pid',
   log_dir => '/var/log/apache2-wpt',
   log_file => ['/var/log/apache2-wpt/access.log','/var/log/apache2-wpt/error.log'],
-  port => '8888',
 }
 file { "wpt_ports.conf":
   ensure  => 'present',
@@ -73,7 +85,6 @@ file { "wpt_ports.conf":
 php::module { ['curl']: }
 wpt::vhost { 'wpt': 
   docroot => '/home/drupal/webpagetest/www/webpagetest',
-  port => '8888',
 }
 # Test agent specific
 exec { 'default_shell':
@@ -86,13 +97,36 @@ apt::source { 'chrome':
   include_src => false,
   key_source => 'http://www.google.com/linuxrepositories/',
 }
-package { 'google-chrome-stable':
+package { ['xvfb', 'google-chrome-stable']:
   ensure => present,
 }
 apt::ppa { 'ppa:grugnog/ipfw': }
 package { 'ipfw3-utils':
   ensure => present,
 }
-package { ['node', 'default-jdk']:
-  ensure => present,
+exec { 'ipfw':
+  command => '/bin/chmod u+s /usr/bin/ipfw',
+  require => Package['ipfw3-utils'],
+}
+
+file { 'xvfb.conf':
+  ensure  => 'present',
+  path    => "/etc/init/xvfb.conf",
+  require => Package['xvfb'],
+  content => template('xvfb.conf'),
+}
+service { 'xvfb':
+  ensure => running,
+  provider => 'upstart',
+  require => File['xvfb.conf'],
+}
+file { 'wptdriver.conf':
+  ensure  => 'present',
+  path    => "/etc/init/wptdriver.conf",
+  content => template('wptdriver.conf'),
+}
+service { 'wptdriver':
+  ensure => running,
+  provider => 'upstart',
+  require => File['wptdriver.conf'],
 }
