@@ -104,12 +104,12 @@ package { 'xvfb':
 }
 package { 'google-chrome-stable':
   ensure => present,
-  require => apt::source['chrome'],
+  require => Apt::Source['chrome'],
 }
 apt::ppa { 'ppa:grugnog/ipfw': }
 package { 'ipfw3-utils':
   ensure => present,
-  require => apt::ppa['ppa:grugnog/ipfw'],
+  require => Apt::Ppa['ppa:grugnog/ipfw'],
 }
 exec { 'ipfw':
   command => '/bin/chmod u+s /usr/bin/ipfw',
@@ -140,7 +140,7 @@ service { 'wptdriver':
 apt::ppa { 'ppa:chris-lea/node.js': }
 package { 'node':
   ensure => present,
-  require => apt::ppa['ppa:chris-lea/node.js'],
+  require => Apt::Ppa['ppa:chris-lea/node.js'],
 }
 package { 'default-jdk':
   ensure => present,
