@@ -137,7 +137,7 @@ service { 'wptdriver':
   provider => 'upstart',
   require => File['wptdriver.conf'],
 }
-apt::ppa { 'ppa:chris-lea/node.js' }
+apt::ppa { 'ppa:chris-lea/node.js': }
 package { 'node':
   ensure => present,
   require => apt::ppa['ppa:chris-lea/node.js'],
