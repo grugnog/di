@@ -1,9 +1,11 @@
 Exec { path => "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
-class { 'apt': }
-class { 'percona::repo::apt': }
-class { 'percona':
-  server => true,
-  percona_version => '5.5',
+#class { 'apt': }
+#class { 'percona::repo::apt': }
+class {
+  'apt':;
+  'percona':
+    server => true,
+    percona_version => '5.5',
 }
 class {'apache': }
 class { 'php': }
@@ -97,12 +99,17 @@ apt::source { 'chrome':
   include_src => false,
   key_source => 'http://www.google.com/linuxrepositories/',
 }
-package { ['xvfb', 'google-chrome-stable']:
+package { 'xvfb':
   ensure => present,
+}
+package { 'google-chrome-stable':
+  ensure => present,
+  require => apt::source['chrome'],
 }
 apt::ppa { 'ppa:grugnog/ipfw': }
 package { 'ipfw3-utils':
   ensure => present,
+  require => apt::ppa['ppa:grugnog/ipfw'],
 }
 exec { 'ipfw':
   command => '/bin/chmod u+s /usr/bin/ipfw',
@@ -129,4 +136,12 @@ service { 'wptdriver':
   ensure => running,
   provider => 'upstart',
   require => File['wptdriver.conf'],
+}
+apt::ppa { 'ppa:chris-lea/node.js' }
+package { 'node':
+  ensure => present,
+  require => apt::ppa['ppa:chris-lea/node.js'],
+}
+package { 'default-jdk':
+  ensure => present,
 }
