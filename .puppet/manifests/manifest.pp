@@ -4,12 +4,11 @@ class { 'percona::repo::apt': }
 class { 'percona':
   server => true,
   percona_version => '5.5',
-  require => Class['percona::repo::apt'],
 }
+Class['apt'] -> Class['percona']
+Class['percona::repo::apt'] -> Class['percona::install']
 class {'apache': }
-class { 'php':
-  require => Class['percona'],
-}
+class { 'php': }
 apache::module { ['expires', 'headers', 'rewrite']: }
 php::module { ['gd', 'mysql', 'xdebug']: }
 php::module { ['pear', 'apc']:

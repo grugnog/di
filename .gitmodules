@@ -10,9 +10,6 @@
 [submodule ".puppet/modules/stdlib"]
 	path = .puppet/modules/stdlib
 	url = git://github.com/puppetlabs/puppetlabs-stdlib.git
-[submodule ".puppet/modules/percona"]
-	path = .puppet/modules/percona
-	url = git://github.com/arioch/puppet-percona.git
 [submodule ".puppet/modules/apache"]
 	path = .puppet/modules/apache
 	url = git://github.com/example42/puppet-apache.git
@@ -28,3 +25,6 @@
 [submodule ".puppet/tools"]
 	path = .puppet/tools
 	url = git://github.com/example42/Example42-tools.git
+[submodule ".puppet/modules/percona"]
+	path = .puppet/modules/percona
+	url = git://github.com/grugnog/puppet-percona.git
