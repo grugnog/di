@@ -98,7 +98,7 @@ apt::source { 'chrome':
   release => 'stable',
   include_src => false,
   key => "A040830F7FAC5991",
-  key_server => "subkeys.pgp.net",
+  key_server => "keyserver.ubuntu.com",
 }
 package { 'xvfb':
   ensure => present,
