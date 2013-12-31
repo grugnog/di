@@ -139,7 +139,7 @@ service { 'wptdriver':
   require => File['wptdriver.conf'],
 }
 apt::ppa { 'ppa:chris-lea/node.js': }
-package { 'node':
+package { 'nodejs':
   ensure => present,
   require => Apt::Ppa['ppa:chris-lea/node.js'],
 }
