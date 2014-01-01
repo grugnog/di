@@ -11,7 +11,7 @@ class {'apache': }
 class { 'php': }
 apache::module { ['expires', 'headers', 'rewrite']: }
 php::module { ['gd', 'mysql', 'xdebug']: }
-php::module { ['pear', 'apc']:
+php::module { ['apc']:
   module_prefix => "php-",
 }
 php::pecl::module { "xhprof":

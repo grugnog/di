@@ -1,4 +1,4 @@
-= Puppet module: wpt
+# Puppet module: wpt
 
 This is a Puppet wpt module from the second generation of Example42 Puppet Modules.
 
@@ -14,7 +14,7 @@ This module requires functions provided by the Example42 Puppi module.
 
 For detailed info about the logic and usage patterns of Example42 modules read README.usage on Example42 main modules set.
 
-== USAGE - Module specific usage
+## USAGE - Module specific usage
 
 * Install wpt with a custom httpd.conf template and some virtual hosts
 
@@ -27,7 +27,52 @@ For detailed info about the logic and usage patterns of Example42 modules read R
            template => 'example42/wpt/vhost/mysite.com.erb',
          }
 
-== USAGE - Basic management
+
+* Install mod ssl
+
+        include wpt::ssl
+
+
+* Manage basic auth users (Here user joe is created with the $crypt_password on the defined htpasswd_file
+
+        wpt::htpasswd { 'joe':
+          crypt_password => 'B5dPQYYjf.jjA',
+          htpasswd_file  => '/etc/httpd/users.passwd',
+        }
+
+
+* Manage custom configuration files (created in conf.d, source or content can be defined)
+
+        wpt::dotconf { 'trac':
+          content => 'template("site/trac/wpt.conf.erb")'
+        }
+
+
+* Add other listening ports (a relevant NameVirtualHost directive is automatically created)
+
+        wpt::listen { '8080': }
+
+
+* Add other listening ports without creating a relevant NameVirtualHost directive
+
+        wpt::listen { '8080':
+          $namevirtualhost = false,
+        }
+
+
+* Add an wpt module and manage its configuraton
+
+        wpt::module { 'proxy':
+          templatefile => 'site/wpt/module/proxy.conf.erb',
+        }
+
+
+* Install mod passenger
+
+        include wpt::passenger
+
+
+## USAGE - Basic management
 
 * Install wpt with default settings
 
@@ -51,18 +96,44 @@ For detailed info about the logic and usage patterns of Example42 modules read R
           absent => true
         }
 
-* Enable auditing without without making changes on existing wpt configuration files
+* Enable auditing without making changes on existing wpt configuration files
 
         class { "wpt":
           audit_only => true
         }
 
-
-== USAGE - Overrides and Customizations
-* Use custom sources for main config file 
+* Install wpt with a specific version
 
         class { "wpt":
-          source => [ "puppet:///modules/lab42/wpt/wpt.conf-${hostname}" , "puppet:///modules/lab42/wpt/wpt.conf" ], 
+          version =>  '2.2.22'
+        }
+
+
+## USAGE - Default server management
+
+* Simple way to manage default wpt configuration
+
+        wpt::vhost { 'default':
+            docroot             => '/var/www/document_root',
+            server_name         => false,
+            priority            => '',
+            template            => 'wpt/virtualhost/vhost.conf.erb',
+        }
+
+* Using a source file to create the vhost
+
+        wpt::vhost { 'default':
+	        source 		=> 'puppet:///files/web/default.conf'
+	        template	=> '',
+        }
+
+
+## USAGE - Overrides and Customizations
+
+* Use custom sources for main config file
+
+        class { "wpt":
+          source => [ "puppet:///modules/lab42/wpt/wpt.conf-${hostname}" , "puppet:///modules/lab42/wpt/wpt.conf" ],
         }
 
 
@@ -97,7 +168,7 @@ For detailed info about the logic and usage patterns of Example42 modules read R
         }
 
 
-== USAGE - Example42 extensions management 
+## USAGE - Example42 extensions management 
 * Activate puppi (recommended, but disabled by default)
   Note that this option requires the usage of Example42 puppi module
 
@@ -131,3 +202,5 @@ For detailed info about the logic and usage patterns of Example42 modules read R
           firewall_dst  => "$ipaddress_eth0",
         }
 
+
+[![Build Status](https://travis-ci.org/example42/puppet-wpt.png?branch=master)](https://travis-ci.org/example42/puppet-wpt)

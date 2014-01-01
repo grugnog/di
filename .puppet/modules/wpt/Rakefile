@@ -1,9 +1,12 @@
-require 'rake'
-require 'rspec/core/rake_task'
+require 'rubygems'
+require 'puppetlabs_spec_helper/rake_tasks'
+require 'puppet-lint'
+PuppetLint.configuration.send("disable_80chars")
+PuppetLint.configuration.send('disable_class_parameter_defaults')
 
-RSpec::Core::RakeTask.new(:test) do |t|
-  t.rspec_opts = ["--format", "doc", "--color"]
-  t.pattern = 'spec/*/*_spec.rb'
+# Blacksmith
+begin
+  require 'puppet_blacksmith/rake_tasks'
+rescue LoadError
+  puts "Blacksmith needed only to push to the Forge"
 end
-
-task :default => :test

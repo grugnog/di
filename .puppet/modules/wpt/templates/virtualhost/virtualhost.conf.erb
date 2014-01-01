@@ -1,12 +1,16 @@
 # File Managed by Puppet
 
 <VirtualHost *:80>
-    ServerAdmin webmaster@<%= name %>
-    DocumentRoot <%= real_documentroot %>
-    ServerName <%= name %>
-<% if aliases != "" -%>
-    ServerAlias <%= aliases %>
+    ServerAdmin webmaster@<%= @name %>
+    DocumentRoot <%= @real_documentroot %>
+    ServerName <%= @name %>
+<% if @aliases != "" -%>
+<% if @aliases.is_a? Array -%>
+    ServerAlias <%= @aliases.flatten.join(" ") %>
+<% else -%>
+    ServerAlias <%= @aliases %>
 <% end -%>
-    ErrorLog  <%= scope.lookupvar('wpt::log_dir')%>/<%= name %>-error_log
-    CustomLog <%= scope.lookupvar('wpt::log_dir')%>/<%= name %>-access_log common
+<% end -%>
+    ErrorLog  <%= scope.lookupvar('wpt::log_dir')%>/<%= @name %>-error_log
+    CustomLog <%= scope.lookupvar('wpt::log_dir')%>/<%= @name %>-access_log common
 </VirtualHost>

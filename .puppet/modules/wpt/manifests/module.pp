@@ -63,6 +63,7 @@ define wpt::module (
   if $install_package != false {
     $modpackage_basename = $::operatingsystem ? {
       /(?i:Ubuntu|Debian|Mint)/ => 'libwpt2-mod-',
+      /(?i:SLES|OpenSuSE)/      => 'wpt2-mod_',
       default                   => 'mod_',
     }
 
@@ -77,6 +78,7 @@ define wpt::module (
       notify  => $manage_service_autorestart,
       require => Package['wpt'],
     }
+
   }
 
 
@@ -104,10 +106,21 @@ define wpt::module (
   or $::operatingsystem == 'Mint' {
     case $ensure {
       'present': {
+
+        $exec_a2enmod_subscribe = $install_package ? {
+          false   => undef,
+          default => Package["ApacheModule_${name}"]
+        }
+        $exec_a2dismode_before = $install_package ? {
+          false   => undef,
+          default => Package["ApacheModule_${name}"]
+        }
+
         exec { "/usr/sbin/a2enmod ${name}":
           unless    => "/bin/sh -c '[ -L ${wpt::config_dir}/mods-enabled/${name}.load ] && [ ${wpt::config_dir}/mods-enabled/${name}.load -ef ${wpt::config_dir}/mods-available/${name}.load ]'",
           notify    => $manage_service_autorestart,
           require   => Package['wpt'],
+          subscribe => $exec_a2enmod_subscribe,
         }
       }
       'absent': {
@@ -115,6 +128,7 @@ define wpt::module (
           onlyif    => "/bin/sh -c '[ -L ${wpt::config_dir}/mods-enabled/${name}.load ] && [ ${wpt::config_dir}/mods-enabled/${name}.load -ef ${wpt::config_dir}/mods-available/${name}.load ]'",
           notify    => $manage_service_autorestart,
           require   => Package['wpt'],
+          before    => $exec_a2dismode_before,
         }
       }
       default: {

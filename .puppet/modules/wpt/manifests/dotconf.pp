@@ -35,7 +35,7 @@ define wpt::dotconf (
     default   => $content,
   }
 
-  file { "Apache_$name.conf":
+  file { "Apache_${name}.conf":
     ensure  => $ensure,
     path    => "${wpt::config_dir}/conf.d/${name}.conf",
     mode    => $wpt::config_file_mode,

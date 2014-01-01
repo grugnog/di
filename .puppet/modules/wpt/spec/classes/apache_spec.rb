@@ -4,7 +4,7 @@ describe 'wpt' do
 
   let(:title) { 'wpt' }
   let(:node) { 'rspec.example42.com' }
-  let(:facts) { { :ipaddress => '10.42.42.42' } }
+  let(:facts) { { :ipaddress => '10.42.42.42' , :monitor_tool => 'puppi' } }
 
   describe 'Test standard installation' do
     it { should contain_package('wpt').with_ensure('present') }
@@ -183,7 +183,7 @@ describe 'wpt' do
 
   describe 'Test params lookup' do
     let(:facts) { { :monitor => true , :ipaddress => '10.42.42.42' } }
-    let(:params) { { :port => '42' } }
+    let(:params) { { :port => '42' , :monitor_tool => 'puppi' } }
 
     it 'should honour top scope global vars' do
       content = catalogue.resource('monitor::process', 'wpt_process').send(:parameters)[:enable]
@@ -193,7 +193,7 @@ describe 'wpt' do
 
   describe 'Test params lookup' do
     let(:facts) { { :wpt_monitor => true , :ipaddress => '10.42.42.42' } }
-    let(:params) { { :port => '42' } }
+    let(:params) { { :port => '42' , :monitor_tool => 'puppi' } }
 
     it 'should honour module specific vars' do
       content = catalogue.resource('monitor::process', 'wpt_process').send(:parameters)[:enable]
@@ -203,7 +203,7 @@ describe 'wpt' do
 
   describe 'Test params lookup' do
     let(:facts) { { :monitor => false , :wpt_monitor => true , :ipaddress => '10.42.42.42' } }
-    let(:params) { { :port => '42' } }
+    let(:params) { { :port => '42' , :monitor_tool => 'puppi' } }
 
     it 'should honour top scope module specific over global vars' do
       content = catalogue.resource('monitor::process', 'wpt_process').send(:parameters)[:enable]
@@ -213,7 +213,7 @@ describe 'wpt' do
 
   describe 'Test params lookup' do
     let(:facts) { { :monitor => false , :ipaddress => '10.42.42.42' } }
-    let(:params) { { :monitor => true , :firewall => true, :port => '42' } }
+    let(:params) { { :monitor => true , :monitor_tool => 'puppi' , :firewall => true, :port => '42' } }
 
     it 'should honour passed params over global vars' do
       content = catalogue.resource('monitor::process', 'wpt_process').send(:parameters)[:enable]

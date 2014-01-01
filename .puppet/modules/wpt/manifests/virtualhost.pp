@@ -1,5 +1,8 @@
 # = Define: wpt::virtualhost
 #
+# NOTE: This define does the same function of wpt::vhost and is
+#       now deprecated. Use wpt::vhost instead.
+#
 # Basic Virtual host management define
 # You can use different templates for your wpt virtual host files
 # Default is virtualhost.conf.erb, adapt it to your needs or create
@@ -30,6 +33,7 @@ define wpt::virtualhost (
   $create_docroot = true ,
   $enable         = true ,
   $owner          = '' ,
+  $content        = '' ,
   $groupowner     = '' ) {
 
   include wpt
@@ -66,10 +70,15 @@ define wpt::virtualhost (
   $ensure = bool2ensure($enable)
   $bool_create_docroot = any2bool($create_docroot)
 
-  file { "ApacheVirtualHost_$name":
+  $real_content = $content ? {
+    ''      => template("${templatepath}/${templatefile}"),
+    default => $content,
+  }
+
+  file { "ApacheVirtualHost_${name}":
     ensure  => $ensure,
     path    => $real_path,
-    content => template("${templatepath}/${templatefile}"),
+    content => $real_content,
     mode    => $wpt::config_file_mode,
     owner   => $wpt::config_file_owner,
     group   => $wpt::config_file_group,
@@ -81,7 +90,7 @@ define wpt::virtualhost (
   # On Debian/Ubuntu manages sites-enabled
   case $::operatingsystem {
     ubuntu,debian,mint: {
-      file { "ApacheVirtualHostEnabled_$name":
+      file { "ApacheVirtualHostEnabled_${name}":
         ensure  => $ensure_link,
         path    => "${wpt::config_dir}/sites-enabled/${real_filename}",
         require => Package['wpt'],
