@@ -28,3 +28,24 @@
 [submodule ".puppet/modules/percona"]
 	path = .puppet/modules/percona
 	url = git://github.com/grugnog/puppet-percona.git
+[submodule ".puppet/modules/ngnix"]
+	path = .puppet/modules/ngnix
+	url = https://github.com/jfryman/puppet-nginx.git
+[submodule ".puppet/modules/nginx"]
+	path = .puppet/modules/nginx
+	url = https://github.com/netmanagers/puppet-nginx
+[submodule ".puppet/modules/concat"]
+	path = .puppet/modules/concat
+	url = https://github.com/puppetlabs/puppetlabs-concat.git
+[submodule ".puppet/modules/interfaces"]
+	path = .puppet/modules/interfaces
+	url = https://github.com/eirc/puppet-interfaces.git
+[submodule ".puppet/modules/network"]
+	path = .puppet/modules/network
+	url = https://github.com/adrienthebo/puppet-network.git
+[submodule ".puppet/modules/filemapper"]
+	path = .puppet/modules/filemapper
+	url = https://github.com/adrienthebo/puppet-filemapper.git
+[submodule ".puppet/modules/boolean"]
+	path = .puppet/modules/boolean
+	url = https://github.com/adrienthebo/puppet-boolean.git

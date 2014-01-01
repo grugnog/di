@@ -1,9 +1,35 @@
 Exec { path => "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
+service { 'networking':
+  ensure => running,
+  provider => 'upstart',
+  subscribe => Network_config[['eth0', 'lo', 'lo:0']],
+}
+network_config { 'eth0':
+  ensure  => 'present',
+  family  => 'inet',
+  method  => 'dhcp',
+  onboot  => 'true',
+  hotplug => 'true',
+}
+network_config { 'lo':
+  ensure => 'present',
+  family => 'inet',
+  method => 'loopback',
+  onboot => 'true',
+}
+network_config { 'lo:0':
+  ensure => 'present',
+  family => 'inet',
+  method => 'static',
+  ipaddress => '127.0.0.2',
+  netmask => '255.0.0.0', 
+  onboot => 'true',
+}
 class { 'apt': }
 class { 'percona::repo::apt': }
 class { 'percona':
   server => true,
-  percona_version => '5.5',
+  percona_version => '5.6',
 }
 Class['apt'] -> Class['percona']
 Class['percona::repo::apt'] -> Class['percona::install']
@@ -25,7 +51,9 @@ file { '000-default':
   notify  => $apache::manage_service_autorestart,
 }
 apache::vhost { 'drupal':
+  ip_addr => '127.0.0.2',
   docroot  => '/home/drupal/drupal',
+  subscribe => Network_config['lo'],
 }
 file { "apache_ports.conf":
   ensure  => 'present',
@@ -47,47 +75,23 @@ percona::rights {'drupal@localhost/drupal':
 }
 
 # WPT server specific
-package {'ffmpeg':
+class { 'nginx': }
+nginx::resource::vhost { '127.0.0.1':
+  listen_ip => '127.0.0.1',
+  www_root => '/home/drupal/webpagetest/www/webpagetest',
+  subscribe => Network_config['lo:0'],
+}
+file { 'default':
+  ensure  => 'absent',
+  path    => "${nginx::config_dir}/sites-enabled/default",
+  require => Package['nginx'],
+  notify  => $nginx::manage_service_autorestart,
+}
+package {['ffmpeg', 'php5-fpm']:
   ensure => 'installed'
-}
-exec { 'apache_instance_wpt':
-  command => '/bin/sh /usr/share/doc/apache2.2-common/examples/setup-instance wpt',
-  onlyif => 'test ! -d /etc/apache2-wpt',
-  require => Package['apache'],
-}
-# Ordering rules - first common config
-File['000-default'] -> Exec['apache_instance_wpt']
-Class['php'] -> Exec['apache_instance_wpt']
-# Specific config
-Exec['apache_instance_wpt'] -> File['wpt_ports.conf']
-Exec['apache_instance_wpt'] -> Wpt::Vhost['wpt']
-Exec['apache_instance_wpt'] -> File['apache_ports.conf']
-Exec['apache_instance_wpt'] -> Apache::Vhost['drupal']
-class {'wpt':
-  package => 'apache2-mpm-prefork', # This is hacky, but saves having to edit the module.
-  service => 'apache2-wpt',
-  config_dir => '/etc/apache2-wpt',
-  config_file => '/etc/apache2-wpt/apache2.conf',
-  pid_file => '/var/run/apache2-wpt.pid',
-  log_dir => '/var/log/apache2-wpt',
-  log_file => ['/var/log/apache2-wpt/access.log','/var/log/apache2-wpt/error.log'],
-}
-file { "wpt_ports.conf":
-  ensure  => 'present',
-  path    => "${wpt::config_dir}/ports.conf",
-  mode    => $wpt::config_file_mode,
-  owner   => $wpt::config_file_owner,
-  group   => $wpt::config_file_group,
-  require => Package['apache'],
-  notify  => $wpt::manage_service_autorestart,
-  content => template('wpt_ports.conf'),
-  audit   => $wpt::manage_audit,
 }
 # WPT also requires gd, declared above and zlib/zip which is built in.
 php::module { ['curl']: }
-wpt::vhost { 'wpt': 
-  docroot => '/home/drupal/webpagetest/www/webpagetest',
-}
 # Test agent specific
 exec { 'default_shell':
   command => 'echo "set dash/sh false" | debconf-communicate && dpkg-reconfigure dash -pcritical'
@@ -100,23 +104,22 @@ apt::source { 'chrome':
   key => "A040830F7FAC5991",
   key_server => "keyserver.ubuntu.com",
 }
-package { 'xvfb':
-  ensure => present,
-}
 package { 'google-chrome-stable':
   ensure => present,
   require => Apt::Source['chrome'],
 }
-apt::ppa { 'ppa:grugnog/ipfw': }
+apt::ppa { 'ppa:kai-mast/misc': }
 package { 'ipfw3-utils':
   ensure => present,
-  require => Apt::Ppa['ppa:grugnog/ipfw'],
+  require => Apt::Ppa['ppa:kai-mast/misc'],
 }
 exec { 'ipfw':
   command => '/bin/chmod u+s /usr/bin/ipfw',
   require => Package['ipfw3-utils'],
 }
-
+package { 'xvfb':
+  ensure => present,
+}
 file { 'xvfb.conf':
   ensure  => 'present',
   path    => "/etc/init/xvfb.conf",
