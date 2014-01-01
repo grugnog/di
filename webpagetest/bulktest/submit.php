@@ -13,8 +13,8 @@ if (LoadResults($results)) {
         foreach ($urls as $url) {
             $url = trim($url);
             if (strlen($url)) {
-                foreach( $locations as $location )
-                    $results[] = array( 'url' => $url, 'location' => $location );
+                foreach( $permutations as $label => &$permutation )
+                    $results[] = array( 'url' => $url, 'label' => $label );
             }
         }
     }
@@ -27,7 +27,8 @@ if (count($results)) {
     foreach ($results as &$result) {
         if (!array_key_exists('id', $result) || 
             !strlen($result['id']) || 
-            (strlen($result['result']) && 
+            (array_key_exists('resubmit', $result) && $result['resubmit']) ||
+            (array_key_exists('result', $result) && 
              $result['result'] != 0 && 
              $result['result'] != 99999)) {
             $testCount++;
@@ -41,7 +42,7 @@ if (count($results)) {
         // store the results
         StoreResults($results);
         
-        echo "Done submitting tests.  The test ID's are stored in results.txt\r\n";
+        echo "Done submitting tests.  The test ID's are stored in results.json\r\n";
     } else {
         echo "No tests to submit, all tests have completed successfully are are still running\r\n";
     }
@@ -63,10 +64,18 @@ function SubmitTests(&$results, $testCount) {
     global $fvonly;
     global $key;
     global $options;
+    global $permutations;
+    global $priority;
 
     $count = 0;
     foreach ($results as &$result) {
-        if (!array_key_exists('id', $result) || !strlen($result['id']) || 
+      if (array_key_exists('label', $result) &&
+          strlen($result['label']) &&
+          array_key_exists($result['label'], $permutations) &&
+          array_key_exists('location', $permutations[$result['label']])) {
+        if (!array_key_exists('id', $result) ||
+            !strlen($result['id']) || 
+            (array_key_exists('resubmit', $result) && $result['resubmit']) ||
             (array_key_exists('result', $result) &&
              strlen($result['result']) && 
              $result['result'] != 0 && 
@@ -74,7 +83,8 @@ function SubmitTests(&$results, $testCount) {
             $count++;
             echo "\rSubmitting test $count of $testCount...                  ";
 
-            $request = $server . "runtest.php?f=json&priority=6&runs=$runs&url=" . urlencode($result['url']) . '&location=' . urlencode($result['location']);
+            $location = $permutations[$result['label']]['location'];
+            $request = $server . "runtest.php?f=json&priority=9&runs=$runs&url=" . urlencode($result['url']) . '&location=' . urlencode($location);
             if( $private )
                 $request .= '&private=1';
             if( $video )
@@ -83,23 +93,36 @@ function SubmitTests(&$results, $testCount) {
                 $request .= '&web10=1';
             if($fvonly)
                 $request .= '&fvonly=1';
+            if(isset($priority)) {
+                if ($priority > 0 && array_key_exists('resubmit', $result) && $result['resubmit']) {
+                  $p = $priority - 1;
+                  $request .= "&priority=$p";
+                } else
+                  $request .= "&priority=$priority";
+            }
             if(strlen($key))
                 $request .= "&k=$key";
-            if (isset($options) && strlen($options)) {
+            if (isset($options) && strlen($options))
                 $request .= '&' . $options;
-            }
+            if (array_key_exists('options', $permutations[$result['label']]) && strlen($permutations[$result['label']]['options']))
+                $request .= '&' . $permutations[$result['label']]['options'];
 
-            $response_str = file_get_contents($request);
+            $response_str = http_fetch($request);
             if (strlen($response_str)) {
                 $response = json_decode($response_str, true);
                 if ($response['statusCode'] == 200) {
-                    $result['id'] = $response['data']['testId'];
+                    $entry = array();
+                    $entry['url'] = $result['url'];
+                    $entry['label'] = $result['label'];
+                    $entry['id'] = $response['data']['testId'];
+                    $result = $entry;
                 } else {
                     echo "\r                                                     ";
-                    echo "\rError '{$response['statusText']}' submitting {$result['url']} to {$result['location']}\r\n";
+                    echo "\rError '{$response['statusText']}' submitting {$result['url']} for {$result['label']}\r\n";
                 }
             }
         }
+      }
     }
     
     // clear the progress text

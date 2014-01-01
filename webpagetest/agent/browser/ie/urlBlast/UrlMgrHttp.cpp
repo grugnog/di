@@ -12,6 +12,9 @@ public:
 		, runs(0)
 		, currentRun(0)
     , discard(0)
+    , specificRun(0)
+    , specificIndex(0)
+    , discardTest(false)
 		{}
 	~CUrlMgrHttpContext(void){}
 	CString testId;
@@ -22,6 +25,9 @@ public:
 	DWORD	runs;
   DWORD discard;
 	DWORD	currentRun;
+  DWORD specificRun;
+  DWORD specificIndex;
+  bool  discardTest;
 };
 
 /*-----------------------------------------------------------------------------
@@ -33,8 +39,13 @@ CUrlMgrHttp::CUrlMgrHttp(CLog &logRef):
 	, lastSuccess(0)
 	, version(0)
 	, noUpdate(false)
+  , port(80)
+  , requestFlags(0)
 {
   SetErrorMode(SEM_FAILCRITICALERRORS);
+
+  requestFlags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE;
+
 	// see if video encoding is possible on this system
 
 	// check if x264.exe is in the same directory as urlblast
@@ -80,7 +91,7 @@ CUrlMgrHttp::CUrlMgrHttp(CLog &logRef):
 			delete [] pVersion;
 		}
 	}
-
+  UpdateDNSServers();
 }
 
 /*-----------------------------------------------------------------------------
@@ -114,6 +125,7 @@ void CUrlMgrHttp::Start()
 		memset(&parts, 0, sizeof(parts));
 		TCHAR szHost[10000];
 		TCHAR object[10000];
+		TCHAR scheme[100];
 		
 		memset(szHost, 0, sizeof(szHost));
 		memset(object, 0, sizeof(object));
@@ -123,25 +135,31 @@ void CUrlMgrHttp::Start()
 		parts.lpszUrlPath = object;
 		parts.dwUrlPathLength = _countof(object);
 		parts.dwStructSize = sizeof(parts);
+    parts.lpszScheme = scheme;
+    parts.dwSchemeLength = sizeof(scheme);
 
+    urlFilesUrl.Replace(_T("www.webpagetest.org"), _T("agent.webpagetest.org"));
 		if( InternetCrackUrl((LPCTSTR)urlFilesUrl, urlFilesUrl.GetLength(), 0, &parts) )
 		{
 			host = szHost;
-      if (!host.CompareNoCase(_T("www.webpagetest.org"))) {
-        host = _T("agent.webpagetest.org");
-      }
 			port = parts.nPort;
-			if( !port )
+      if (!lstrcmpi(parts.lpszScheme, _T("https"))) {
+        requestFlags |= INTERNET_FLAG_SECURE |
+                        INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
+                        INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+        if (!port)
+          port = 443;
+      } else if( !port )
 				port = 80;
 			CString videoStr;
 			if( videoSupported )
-				videoStr = _T("video=1&");
+				videoStr = _T("&video=1");
 			if( version && !noUpdate )
 				verString.Format(_T("&ver=%d"), version);
 			CString ec2;
 			if( ec2Instance.GetLength() )
 				ec2 = CString(_T("&ec2=")) + ec2Instance;
-			getWork = CString(object) + CString(_T("getwork.php?")) + videoStr + CString(_T("location=")) + location + CString(_T("&key=")) + key + ec2;
+			getWork = CString(_T("getwork.php?shards=1")) + videoStr + CString(_T("&location=")) + location + CString(_T("&key=")) + key + ec2;
 			workDone = CString(object) + _T("workdone.php");
 			resultImage = CString(object) + _T("resultimage.php");
 
@@ -151,10 +169,13 @@ void CUrlMgrHttp::Start()
 			name[0] = 0;
 			if( GetComputerName(name, &len) && lstrlen(name) )
 			{
+			  pcName = name;
 				TCHAR escaped[INTERNET_MAX_URL_LENGTH];
 				len = _countof(escaped);
-				if( (UrlEscape(name, escaped, &len, URL_ESCAPE_SEGMENT_ONLY | URL_ESCAPE_PERCENT) == S_OK) && lstrlen(escaped) )
+				if( (UrlEscape(name, escaped, &len, URL_ESCAPE_SEGMENT_ONLY | URL_ESCAPE_PERCENT) == S_OK) && lstrlen(escaped) ) {
 					getWork += CString(_T("&pc=")) + CString(escaped);
+					pcName = escaped;
+				}
 			}
 
 			lastSuccess = GetTickCount();
@@ -169,7 +190,7 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
 {
 	bool ret = false;
 	
-	// wait 10 seconds between checks when we don't get tests back
+	// wait 1 second between checks when we don't get tests back
 	DWORD now = GetTickCount();
 	if( now >= nextCheck )
 	{
@@ -227,12 +248,7 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
 							{
 								context->testId = value;
 								context->fileBase = value;
-								context->fileRunBase = context->fileBase;
-								if( context->fileBase.Find(_T('-')) == -1 )
-									context->fileRunBase += _T("-1");
-								info.logFile = workDir + context->fileRunBase;
-							}
-							else if( !key.CompareNoCase(_T("url")) )
+							} else if( !key.CompareNoCase(_T("url")) )
 								info.url = value;
 							else if( !key.CompareNoCase(_T("DOMElement")) )
 								info.domElement = value;
@@ -270,14 +286,14 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
 								info.basicAuth = value;
 							else if( !key.CompareNoCase(_T("runs")) )
 								context->runs = _ttol(value);
+							else if( !key.CompareNoCase(_T("run")) )
+								context->specificRun = _ttol(value);
+							else if( !key.CompareNoCase(_T("index")) )
+								context->specificIndex = _ttol(value);
+							else if( !key.CompareNoCase(_T("discardTest")) && _ttol(value) )
+								context->discardTest = true;
 							else if( !key.CompareNoCase(_T("Capture Video")) )
 								info.captureVideo = _ttol(value) != 0;
-							else if( !key.CompareNoCase(_T("aft")) )
-								info.aft = _ttol(value);
-							else if( !key.CompareNoCase(_T("aftMinChanges")) )
-								info.aftMinChanges = _ttol(value);
-							else if( !key.CompareNoCase(_T("aftEarlyCutoff")) )
-								info.aftEarlyCutoff = _ttol(value);
 							else if( !key.CompareNoCase(_T("type")) )
                 info.testType = value.Trim();
 							else if( !key.CompareNoCase(_T("bwIn")) )
@@ -310,7 +326,7 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
                 info.noImages = _ttol(value);
 							else if( !key.CompareNoCase(_T("noheaders")) )
                 info.noHeaders = _ttol(value);
-							else if( !key.CompareNoCase(_T("discard")) )
+							else if( !key.CompareNoCase(_T("discard")) && !context->specificRun )
                 context->discard = _ttol(value);
 							else if( !key.CompareNoCase(_T("imageQuality")) )
                 info.imageQuality = max(0, min(100, _ttol(value)));
@@ -318,6 +334,8 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
                 info.pngScreenShot = _ttol(value);
 							else if( !key.CompareNoCase(_T("bodies")) )
                 info.bodies = _ttol(value);
+							else if( !key.CompareNoCase(_T("htmlbody")) )
+                info.htmlbody = _ttol(value);
 							else if( !key.CompareNoCase(_T("time")) )
                 info.minimumDuration = min(120, max(0, _ttol(value)));
 							else if( !key.CompareNoCase(_T("clearRV")) )
@@ -329,6 +347,8 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
                   info.customRules += _T("\n");
                 info.customRules += value;
               }
+							else if( !key.CompareNoCase(_T("clearcerts")) && _ttol(value) )
+                info.clearCerts = true;
 						}
 					}
 
@@ -340,15 +360,25 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
 				{
 					ret = true;
 					info.context = context;
-					context->currentRun = 1;
-          info.currentRun = 1;
-          context->discard = __min(context->discard, context->runs - 1);
+          if (context->specificRun) {
+					  context->currentRun = context->specificRun;
+            info.currentRun = context->specificRun;
+            context->discard = 0;
+          } else {
+					  context->currentRun = 1;
+            info.currentRun = 1;
+            context->discard = __min(context->discard, context->runs - 1);
+          }
+          int index = context->specificIndex ? context->specificIndex : info.currentRun;
 					
           if( !info.testType.GetLength() && info.url.Find(_T("://")) == -1 )
 						info.url = CString(_T("http://")) + info.url;
 
+					context->fileRunBase.Format(_T("%s-%d"), (LPCTSTR)context->fileBase, index);
+					info.logFile = workDir + context->fileRunBase;
+
 					if( info.eventText.IsEmpty() )						
-						info.eventText = _T("Run_1");
+            info.eventText.Format(_T("Run_%d"), info.currentRun);
 
 					if( info.harvestLinks )
 						info.linksFile = workDir + context->fileRunBase + _T("_links.txt");
@@ -382,7 +412,7 @@ bool CUrlMgrHttp::GetNextUrl(CTestInfo &info)
 			}
 		}
 		else
-			nextCheck = now + 15000;
+			nextCheck = now + 5000;
 	}
 			
 	return ret;
@@ -394,6 +424,7 @@ bool CUrlMgrHttp::RunRepeatView(CTestInfo &info)
 {
 	bool ret = true;
 
+  UpdateDNSServers();
 	if( !info.zipFileDir.IsEmpty() )
 		ret = false;
 	else if( info.context )
@@ -404,7 +435,7 @@ bool CUrlMgrHttp::RunRepeatView(CTestInfo &info)
 		
 		if( ret )
 		{
-      if( context->discard )
+      if( context->discard || context->discardTest )
       {
         DeleteResults(info);
       }
@@ -429,6 +460,7 @@ bool CUrlMgrHttp::RunRepeatView(CTestInfo &info)
 			// delete the log file
 			DeleteFile(info.logFile);
 
+      info.cached = true;
 			info.logFile += _T("_Cached");
 
 			if( info.harvestLinks )
@@ -449,6 +481,7 @@ bool CUrlMgrHttp::RunRepeatView(CTestInfo &info)
 -----------------------------------------------------------------------------*/
 void CUrlMgrHttp::UrlFinished(CTestInfo &info)
 {
+  UpdateDNSServers();
 	if( info.context )
 	{
 		CUrlMgrHttpContext * context = (CUrlMgrHttpContext *)info.context;
@@ -470,7 +503,7 @@ void CUrlMgrHttp::UrlFinished(CTestInfo &info)
 		}
 		else
 		{
-			if( context->currentRun >= context->runs )
+			if( context->specificRun || context->specificIndex || context->currentRun >= context->runs )
 				info.done = true;
 			else
 				info.done = false;
@@ -512,12 +545,12 @@ void CUrlMgrHttp::UrlFinished(CTestInfo &info)
 				  context->currentRun++;
         }
         info.currentRun++;  // increment the actual run count regardless of discard state
+        info.cached = false;
 				CString runText;
 				runText.Format(_T("%d"), context->currentRun);
 				context->fileRunBase = context->fileBase + CString(_T("-")) + runText;
 
 				info.logFile = workDir + context->fileRunBase;
-
 				info.eventText = CString(_T("Run_")) + runText;
 
 				if( info.harvestLinks )
@@ -550,207 +583,118 @@ bool CUrlMgrHttp::GetJob(CStringA &job, CStringA &script, bool& zip, bool& updat
 	HANDLE hFile = INVALID_HANDLE_VALUE;
 
 	// make sure we are configured to check
-	if( !host.IsEmpty() && !getWork.IsEmpty())
-	{
+	if( !host.IsEmpty() && !getWork.IsEmpty()) {
 		// fetch a job from the server
-		try
-		{
-			log.Trace(_T("Requesting work from %s%s"), (LPCTSTR)host, (LPCTSTR)getWork);
+		log.Trace(_T("Requesting work from %s%s"), (LPCTSTR)host, (LPCTSTR)getWork);
 
-			// set up the session
-			CInternetSession * session;
-			if( proxy.IsEmpty() )
-				session = new CInternetSession();
-			else	
-				session = new CInternetSession(_T("urlBlast"), 1, INTERNET_OPEN_TYPE_PROXY, proxy, NULL, INTERNET_FLAG_DONT_CACHE);
-			
-			if( session )
-			{
-				DWORD timeout = 300000;
-				session->SetOption(INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout), 0);
-				session->SetOption(INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout), 0);
+		// set up the session
+    HINTERNET internet = InternetOpen(_T("urlBlast"), INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (internet) {
+      DWORD timeout = 240000;
+      InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_DATA_SEND_TIMEOUT, &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_DATA_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
 
-        CString diskSpace;
-        ULARGE_INTEGER fd;
-        if( GetDiskFreeSpaceEx(_T("C:\\"), NULL, NULL, &fd) )
-        {
-          double freeDisk = (double)(fd.QuadPart / (1024 * 1024)) / 1024.0;
-          diskSpace.Format(_T("&freedisk=%0.3f"), freeDisk);
-        }
+      CString diskSpace;
+      ULARGE_INTEGER fd;
+      if( GetDiskFreeSpaceEx(_T("C:\\"), NULL, NULL, &fd) )
+      {
+        double freeDisk = (double)(fd.QuadPart / (1024 * 1024)) / 1024.0;
+        diskSpace.Format(_T("&freedisk=%0.3f"), freeDisk);
+      }
+      
+      CString dns = _T("");
+      if (!dnsServers.IsEmpty())
+        dns = CString(_T("&dns=")) + dnsServers;
 
-        // IE Version
-	      CRegKey key;
-        CString IEVer;
-	      if( SUCCEEDED(key.Open(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Internet Explorer"), KEY_READ)) )
+      // IE Version
+      CRegKey key;
+      CString IEVer;
+      if( SUCCEEDED(key.Open(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Internet Explorer"), KEY_READ)) )
+      {
+        TCHAR iebuff[1024];
+        ULONG iebufflen = _countof(iebuff);
+	      if( SUCCEEDED(key.QueryStringValue(_T("Version"), iebuff, &iebufflen)) && iebufflen )
 	      {
-	        TCHAR iebuff[1024];
-	        ULONG iebufflen = _countof(iebuff);
-		      if( SUCCEEDED(key.QueryStringValue(_T("Version"), iebuff, &iebufflen)) && iebufflen )
-		      {
-            IEVer.Format(_T("&ie=%s"), iebuff);
-            IEVer.Trim();
-		      }
-          key.Close();
+          IEVer.Format(_T("&ie=%s"), iebuff);
+          IEVer.Trim();
 	      }
+        key.Close();
+      }
 
-				CHttpConnection * connection = session->GetHttpConnection(host, port);
-				if( connection )
-				{
-					CHttpFile * file = connection->OpenRequest(_T("GET"), getWork + verString + diskSpace + IEVer, 0, 1, 0, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE);
-					if( file )
-					{
-						if( file->SendRequest() )
-						{
-							// Get the request return code
-							DWORD dwRetCode = HTTP_STATUS_BAD_REQUEST;
-							file->QueryInfoStatusCode(dwRetCode); 			
-							if( dwRetCode == HTTP_STATUS_OK )
-							{
-								// update the timestamp for when we successfully talked to the server
-								lastSuccess = GetTickCount();
-
-                // If the system time is more than 1 minute off of the server
-                // set the clock to match the server time
-                SYSTEMTIME serverTime;
-                if( file->QueryInfo(HTTP_QUERY_DATE | HTTP_QUERY_FLAG_SYSTEMTIME, &serverTime) )
-                {
-                  SYSTEMTIME systemTime;
-                  GetSystemTime(&systemTime);
-                  FILETIME ftServer, ftSystem;
-                  if( SystemTimeToFileTime(&serverTime, &ftServer) && SystemTimeToFileTime(&systemTime, &ftSystem) )
-                  {
-                    LARGE_INTEGER tServer, tSystem;
-                    tServer.HighPart = ftServer.dwHighDateTime;
-                    tServer.LowPart = ftServer.dwLowDateTime;
-                    tSystem.HighPart = ftSystem.dwHighDateTime;
-                    tSystem.LowPart = ftSystem.dwLowDateTime;
-                    int tDelta = abs((int)((tServer.QuadPart - tSystem.QuadPart) / (__int64)10000000));
-                    if( tDelta > 60 )
-                      SetSystemTime(&serverTime);
-                  }
-                }
-
-								// get the mime type
-								CString mime;
-								zip = false;
-								if( file->QueryInfo(HTTP_QUERY_CONTENT_TYPE, mime) )
-								{
-									log.Trace(_T("Job of type '%s' received"), (LPCTSTR)mime);
-									if( !mime.CompareNoCase(_T("application/zip")) )
-									{
-										zip = true;
-
-										// create the temporary file
-										TCHAR tmp[MAX_PATH];
-										if( GetTempFileName(workDir, _T("zip"), 0, tmp) )
-										{
-											log.Trace(_T("Writing zip file to %s"), tmp);
-											job = tmp;
-											DeleteFileA(job);
-											CreateDirectoryA(job, NULL);
-											hFile = CreateFileA(job + "\\tmp.zip", GENERIC_WRITE, 0, &nullDacl, CREATE_ALWAYS, 0, 0);
-											if( hFile == INVALID_HANDLE_VALUE )
-											{
-												job.Empty();
-											}
-										}
-									}
-								}
-
-								char buff[4097];
-								DWORD len = sizeof(buff) - 1;
-								UINT bytes = 0;
-								do
-								{
-									bytes = file->Read(buff, len);
-									if( bytes )
-									{
-										ret = true;
-										if( zip )
-										{
-											// write it to the temporary file
-											if( hFile != INVALID_HANDLE_VALUE )
-											{
-												DWORD written;
-												WriteFile(hFile, buff, bytes, &written, 0);
-											}
-										}
-										else
-										{
-											buff[bytes] = 0;	// NULL-terminate it
-											job += buff;
-										}
-									}
-								}while( bytes );
-
-								if( hFile != INVALID_HANDLE_VALUE )
-									CloseHandle( hFile );
-
-								if( job.IsEmpty() )
-									log.Trace(_T("Work request response was empty"));
-							}
-							else
-								log.Trace(_T("Work request responded with %d"), dwRetCode);
-						}
-						else
-							log.Trace(_T("SendRequest Failed"));
-
-						file->Close();
-						delete file;
-					}
-					connection->Close();
-					delete connection;
-				}
-
-				session->Close();
-				delete session;
-			}
+      CString url = urlFilesUrl + getWork + verString + diskSpace + IEVer + dns;
+      HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
+                                  INTERNET_FLAG_NO_CACHE_WRITE | 
+                                  INTERNET_FLAG_NO_UI | 
+                                  INTERNET_FLAG_PRAGMA_NOCACHE | 
+                                  INTERNET_FLAG_RELOAD, NULL);
+      if (http_request) {
+        TCHAR mime_type[1024] = TEXT("\0");
+        DWORD len = _countof(mime_type);
+        if (HttpQueryInfo(http_request,HTTP_QUERY_CONTENT_TYPE, mime_type, 
+                            &len, NULL)) {
+          ret = true;
+				  zip = false;
+          char buff[4097];
+          DWORD bytes_read, bytes_written;
+          HANDLE file = INVALID_HANDLE_VALUE;
+          if (!lstrcmpi(mime_type, _T("application/zip"))) {
+						TCHAR tmp[MAX_PATH];
+						if( GetTempFileName(workDir, _T("zip"), 0, tmp) ) {
+							log.Trace(_T("Writing zip file to %s"), tmp);
+							job = tmp;
+						  DeleteFileA(job);
+						  CreateDirectoryA(job, NULL);
+						  hFile = CreateFileA(job + "\\tmp.zip", GENERIC_WRITE, 0, &nullDacl, CREATE_ALWAYS, 0, 0);
+							if( hFile == INVALID_HANDLE_VALUE )
+								job.Empty();
+            }
+            zip = true;
+          }
+          while (InternetReadFile(http_request, buff, sizeof(buff) - 1, 
+                  &bytes_read) && bytes_read) {
+            if (zip) {
+              if( hFile != INVALID_HANDLE_VALUE )
+                WriteFile(hFile, buff, bytes_read, &bytes_written, 0);
+            } else {
+              // NULL-terminate it and add it to our response string
+              buff[bytes_read] = 0;
+              job += buff;
+            }
+          }
+          if (hFile != INVALID_HANDLE_VALUE)
+            CloseHandle(hFile);
+        }
+        InternetCloseHandle(http_request);
+      }
 		}
-		catch(CInternetException * e)
-		{
-			TCHAR err[1024];
-			if( e->GetErrorMessage(err, _countof(err)) )
-				log.Trace(_T("Error requesting work: %d - %s"), e->m_dwError, err);
-			else
-				log.Trace(_T("Error requesting work: %d"), e->m_dwError);
-			e->Delete();
-		}	
-		catch(...)
-		{
-			log.Trace(_T("Unknown error requesting work"));
-		}
+		InternetCloseHandle(internet);
 	}
 
 	// see if there was a script in the job as well
-	if( ret && !zip && !job.IsEmpty() )
-	{
+	if( ret && !zip && !job.IsEmpty() ) {
 		int index = job.Find("[Script]");
-		if( index >= 0 )
-		{
+		if( index >= 0 ) {
 			script = job.Mid(index + 8).Trim();
 			job = job.Left(index);
 		}
 	}
 
 	// see if we need to extract a zip file
-	if( ret && zip && !job.IsEmpty() )
-	{
+	if( ret && zip && !job.IsEmpty() ) {
 		unzFile zipFile = unzOpen(job + "\\tmp.zip");
-		if( zipFile )
-		{
-			if( unzGoToFirstFile(zipFile) == UNZ_OK )
-			{
+		if( zipFile ) {
+			if( unzGoToFirstFile(zipFile) == UNZ_OK ) {
 				DWORD len = 4096;
 				LPBYTE buff = (LPBYTE)malloc(len);
-				if( buff )
-				{
-					do
-					{
+				if( buff ) {
+					do {
 						char fileName[MAX_PATH];
 						unz_file_info info;
 
-						if( unzGetCurrentFileInfo(zipFile, &info, (char *)&fileName, _countof(fileName), 0, 0, 0, 0) == UNZ_OK )
-						{
+						if( unzGetCurrentFileInfo(zipFile, &info, (char *)&fileName, _countof(fileName), 0, 0, 0, 0) == UNZ_OK ) {
 							CStringA destFile = job + CStringA("\\") + fileName;
 
 							if( !lstrcmpiA(fileName, "update.ini") )
@@ -764,14 +708,11 @@ bool CUrlMgrHttp::GetJob(CStringA &job, CStringA &script, bool& zip, bool& updat
 								SHCreateDirectoryExA(NULL, szDir, NULL);
 
 							HANDLE hOutFile = CreateFileA( destFile, GENERIC_WRITE, 0, &nullDacl, CREATE_ALWAYS, 0, 0 );
-							if( hOutFile != INVALID_HANDLE_VALUE )
-							{
-								if( unzOpenCurrentFile(zipFile) == UNZ_OK )
-								{
+							if( hOutFile != INVALID_HANDLE_VALUE ) {
+								if( unzOpenCurrentFile(zipFile) == UNZ_OK ) {
 									int bytes = 0;
 									DWORD written;
-									do
-									{
+									do {
 										bytes = unzReadCurrentFile(zipFile, buff, len);
 										if( bytes > 0 )
 											WriteFile( hOutFile, buff, bytes, &written, 0);
@@ -875,7 +816,8 @@ bool CUrlMgrHttp::UploadFile(CString url, CTestInfo &info, CString& file, CStrin
 	bool ret = false;
 
 	// make sure we are configured to check
-	if( !host.IsEmpty() && !url.IsEmpty() )
+	CUrlMgrHttpContext * context = (CUrlMgrHttpContext *)info.context;
+	if( !host.IsEmpty() && !url.IsEmpty() && context )
 	{
 		// try to upload the file 5 time (in case there is a server problem)
 		int count = 0;
@@ -883,92 +825,74 @@ bool CUrlMgrHttp::UploadFile(CString url, CTestInfo &info, CString& file, CStrin
 		{
 			count++;
 			DWORD fileSize = 0;
-			HANDLE hFile = CreateFile(file, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
-			if( hFile != INVALID_HANDLE_VALUE )
-				fileSize = GetFileSize(hFile,0);
+			HANDLE hFile = INVALID_HANDLE_VALUE;
+      if (!context->discardTest) {
+        hFile = CreateFile(file, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+			  if( hFile != INVALID_HANDLE_VALUE )
+				  fileSize = GetFileSize(hFile,0);
+      }
 			
-      log.Trace(_T("Uploading %d byte file %s"), fileSize, (LPCTSTR)file);
+      log.Trace(_T("Uploading %d byte file %s to %s"), fileSize, (LPCTSTR)file, (LPCTSTR)url);
 
       // build up the post data
 			CStringA headers, body, footer;	
 			DWORD requestLen = 0;
-			if( BuildFormData( info, headers, body, footer, fileSize, requestLen, fileName ) )
-			{
-				// upload the results
-				try
-				{
-					// set up the session
-					CInternetSession * session;
-					if( proxy.IsEmpty() )
-						session = new CInternetSession();
-					else	
-						session = new CInternetSession(_T("urlBlast"), 1, INTERNET_OPEN_TYPE_PROXY, proxy, NULL, INTERNET_FLAG_DONT_CACHE);
+			if( BuildFormData( info, headers, body, footer, fileSize, requestLen, fileName ) ) {
+        HINTERNET internet = InternetOpen(_T("urlBlast"), INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+        if (internet) {
+          DWORD timeout = 240000;
+          InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+          InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+          InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+          InternetSetOption(internet, INTERNET_OPTION_DATA_SEND_TIMEOUT, &timeout, sizeof(timeout));
+          InternetSetOption(internet, INTERNET_OPTION_DATA_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
 
-					if( session )
-					{
-						DWORD timeout = 240000;
-						session->SetOption(INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout), 0);
-						session->SetOption(INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout), 0);
+          HINTERNET connect = InternetConnect(internet, host, port, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
+          if (connect){
+            HINTERNET request = HttpOpenRequest(connect, _T("POST"), url, 
+                                                  NULL, NULL, NULL, 
+                                                  INTERNET_FLAG_NO_CACHE_WRITE |
+                                                  INTERNET_FLAG_NO_UI |
+                                                  INTERNET_FLAG_PRAGMA_NOCACHE |
+                                                  INTERNET_FLAG_RELOAD |
+                                                  INTERNET_FLAG_KEEP_CONNECTION, NULL);
+            if (request){
+              if (HttpAddRequestHeadersA(request, headers, headers.GetLength(), 
+                                        HTTP_ADDREQ_FLAG_ADD |
+                                        HTTP_ADDREQ_FLAG_REPLACE)) {
+                INTERNET_BUFFERS buffers;
+                memset( &buffers, 0, sizeof(buffers) );
+                buffers.dwStructSize = sizeof(buffers);
+                buffers.dwBufferTotal = requestLen;
+                if (HttpSendRequestEx(request, &buffers, NULL, 0, NULL)) {
+                  DWORD bytes_written;
+                  if (InternetWriteFile(request, (LPCSTR)body, body.GetLength(), &bytes_written)) {
+                    // upload the file itself
+                    if (hFile != INVALID_HANDLE_VALUE && fileSize) {
+                        DWORD chunkSize = min(64 * 1024, fileSize);
+                        LPBYTE mem = (LPBYTE)malloc(chunkSize);
+                        if (mem) {
+                          DWORD bytes;
+                          while (ReadFile(hFile, mem, chunkSize, &bytes, 0) && bytes)
+                            InternetWriteFile(request, mem, bytes, &bytes_written);
+                          free(mem);
+                        }
+                    }
 
-						CHttpConnection * connection = session->GetHttpConnection(host, port);
-						if( connection )
-						{
-							CHttpFile * httpFile = connection->OpenRequest(CHttpConnection::HTTP_VERB_POST, url, 0, 1, 0, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE);
-							if( httpFile )
-							{
-								if( httpFile->AddRequestHeaders(CA2T(headers)) )
-								{
-									if( httpFile->SendRequestEx(requestLen) )
-									{
-										httpFile->Write( (LPCVOID)(LPCSTR)body, body.GetLength() );
-										
-										// upload the actual file
-										if( hFile != INVALID_HANDLE_VALUE )
-										{
-											// update the timestamp for when we successfully talked to the server
-											lastSuccess = GetTickCount();
-
-											DWORD chunkSize = 64 * 1024;
-											LPBYTE mem = (LPBYTE)malloc(chunkSize);
-											if( mem )
-											{
-												DWORD bytes;
-												while( ReadFile(hFile, mem, chunkSize, &bytes, 0) && bytes )
-													httpFile->Write(mem, bytes);
-												free(mem);
-											}
-										}
-										
-										httpFile->Write( (LPCVOID)(LPCSTR)footer, footer.GetLength() );
-
-										if( httpFile->EndRequest() )
-										{
-											DWORD dwRetCode = HTTP_STATUS_BAD_REQUEST;
-											httpFile->QueryInfoStatusCode(dwRetCode); 			
-											if( dwRetCode == HTTP_STATUS_OK )
-												ret = true;
-										}
-									}
-								}
-								httpFile->Close();
-								delete httpFile;
-							}
-
-							connection->Close();
-							delete connection;
-						}
-
-						session->Close();
-						delete session;
-					}
-				}
-				catch(CInternetException * e)
-				{
-					e->Delete();
-				}
-				catch(...)
-				{
-				}
+                    // upload the end of the form data
+                    if (InternetWriteFile(request, (LPCSTR)footer, footer.GetLength(), &bytes_written)) {
+                      if (HttpEndRequest(request, NULL, 0, 0))
+                        ret = true;
+                    }
+                  }
+                }
+              }
+              InternetCloseHandle(request);
+            }
+            InternetCloseHandle(connect);
+          }
+          InternetCloseHandle(internet);
+        }
 			}
 
 			if( hFile != INVALID_HANDLE_VALUE )
@@ -989,9 +913,10 @@ bool CUrlMgrHttp::BuildFormData(CTestInfo &info, CStringA& headers, CStringA& bo
 	bool ret = true;
 
 	CStringA id;
-	if( info.context )
+  CStringA buff;
+	CUrlMgrHttpContext * context = (CUrlMgrHttpContext *)info.context;
+	if( context )
 	{
-		CUrlMgrHttpContext * context = (CUrlMgrHttpContext *)info.context;
 		id = CT2A(context->testId);
 
 		if( !fileName.GetLength() )
@@ -1030,6 +955,31 @@ bool CUrlMgrHttp::BuildFormData(CTestInfo &info, CStringA& headers, CStringA& bo
 		body += "\r\n";
 	}
 
+	// run number
+	body += "--";
+	body += boundary + "\r\n";
+	body += "Content-Disposition: form-data; name=\"run\"\r\n\r\n";
+  buff.Format("%d", info.currentRun);
+  body += buff;
+	body += "\r\n";
+
+  // index
+  if (context && context->specificIndex) {
+	  body += "--";
+	  body += boundary + "\r\n";
+	  body += "Content-Disposition: form-data; name=\"index\"\r\n\r\n";
+    buff.Format("%d", context->specificIndex);
+    body += buff;
+	  body += "\r\n";
+  }
+
+	// first/repeat view
+	body += "--";
+	body += boundary + "\r\n";
+	body += "Content-Disposition: form-data; name=\"cached\"\r\n\r\n";
+  body += info.cached ? "1" : "0";
+	body += "\r\n";
+
 	// if it is a video file
 	if( !info.zipFileDir.IsEmpty() )
 	{
@@ -1039,7 +989,37 @@ bool CUrlMgrHttp::BuildFormData(CTestInfo &info, CStringA& headers, CStringA& bo
 		body += "1";
 		body += "\r\n";
 	}
-	
+
+  if (pcName.GetLength()) {
+    body += CStringA("--") + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"pc\"\r\n\r\n";
+    body += CStringA(CT2A(pcName)) + "\r\n";
+  }
+
+  if (ec2Instance.GetLength()) {
+    body += CStringA("--") + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"ec2\"\r\n\r\n";
+    body += CStringA(CT2A(ec2Instance)) + "\r\n";
+  }
+
+	// DNS Servers
+	if( !dnsServers.IsEmpty() )
+	{
+		body += "--";
+		body += boundary + "\r\n";
+		body += "Content-Disposition: form-data; name=\"dns\"\r\n\r\n";
+		body += CStringA(CT2A(dnsServers));
+		body += "\r\n";
+	}
+
+  if (info.cpu > 0) {
+    body += CStringA("--") + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"cpu\"\r\n\r\n";
+    buff.Format("%d", info.cpu);
+    body += buff + "\r\n";
+  }
+
+
 	// if we're done
 	if( info.done )
 	{
@@ -1065,7 +1045,6 @@ bool CUrlMgrHttp::BuildFormData(CTestInfo &info, CStringA& headers, CStringA& bo
 	footer += boundary + "--\r\n";
 	
 	requestLen = body.GetLength() + fileSize + footer.GetLength();
-	CStringA buff;
 	buff.Format("Content-Length: %u\r\n", requestLen);
 	headers += buff;
 	
@@ -1077,7 +1056,8 @@ bool CUrlMgrHttp::BuildFormData(CTestInfo &info, CStringA& headers, CStringA& bo
 -----------------------------------------------------------------------------*/
 void CUrlMgrHttp::UploadImages(CTestInfo &info)
 {
-	if( info.context )
+  CUrlMgrHttpContext * context = (CUrlMgrHttpContext *)info.context;
+  if( context && !context->discardTest )
 	{
     // go through the different file types we want to upload
     TCHAR * extensions[] = {_T("*.jpg"), _T("*.png"), _T("*.dtas"), _T("*.cap"), _T("*.gz"), _T("*.hist")};
@@ -1087,7 +1067,6 @@ void CUrlMgrHttp::UploadImages(CTestInfo &info)
       TCHAR * ext = extensions[i];
 
 		  // upload (and delete) all of the files that match the extenstion in the directory one at a time
-		  CUrlMgrHttpContext * context = (CUrlMgrHttpContext *)info.context;
 		  WIN32_FIND_DATA fd;
 		  HANDLE hFind = FindFirstFile( workDir + context->fileRunBase + ext, &fd);
 		  if( hFind != INVALID_HANDLE_VALUE )
@@ -1246,4 +1225,108 @@ void CUrlMgrHttp::DeleteResults(CTestInfo &info)
       FindClose(hFind);
     }
   }
+}
+
+/*-----------------------------------------------------------------------------
+  Update our list of DNS servers
+-----------------------------------------------------------------------------*/
+void CUrlMgrHttp::UpdateDNSServers() {
+  DWORD len = 15000;
+  dnsServers.Empty();
+  PIP_ADAPTER_ADDRESSES addresses = (PIP_ADAPTER_ADDRESSES)malloc(len);
+  if (addresses) {
+    DWORD ret = GetAdaptersAddresses(AF_INET,
+                                     GAA_FLAG_SKIP_ANYCAST |
+                                     GAA_FLAG_SKIP_FRIENDLY_NAME |
+                                     GAA_FLAG_SKIP_MULTICAST,
+                                     NULL, addresses, &len);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+      addresses = (PIP_ADAPTER_ADDRESSES)realloc(addresses, len);
+      if (addresses)
+        ret = GetAdaptersAddresses(AF_INET,
+                                   GAA_FLAG_SKIP_ANYCAST |
+                                   GAA_FLAG_SKIP_FRIENDLY_NAME |
+                                   GAA_FLAG_SKIP_MULTICAST,
+                                   NULL, addresses, &len);
+    }
+    if (ret == NO_ERROR) {
+      CString buff;
+      for (PIP_ADAPTER_ADDRESSES address = addresses;
+           address != NULL;
+           address = address->Next) {
+        if (address->OperStatus == IfOperStatusUp) {
+          for (PIP_ADAPTER_DNS_SERVER_ADDRESS_XP dns =
+              address->FirstDnsServerAddress;
+              dns != NULL;
+              dns = dns->Next) {
+            if (dns->Address.iSockaddrLength >= sizeof(struct sockaddr_in) &&
+                dns->Address.lpSockaddr->sa_family == AF_INET) {
+              struct sockaddr_in* addr = 
+                  (struct sockaddr_in *)dns->Address.lpSockaddr;
+              buff.Format(_T("%d.%d.%d.%d"),
+                          addr->sin_addr.S_un.S_un_b.s_b1,
+                          addr->sin_addr.S_un.S_un_b.s_b2,
+                          addr->sin_addr.S_un.S_un_b.s_b3,
+                          addr->sin_addr.S_un.S_un_b.s_b4);
+              if (!dnsServers.IsEmpty())
+                dnsServers += "-";
+              dnsServers += buff;
+            }
+          }
+        }
+      }
+    }
+    if (addresses)
+      free(addresses);
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Helper function to crack an url into it's component parts
+-----------------------------------------------------------------------------*/
+bool CUrlMgrHttp::CrackUrl(CString url, CString &host, unsigned short &port,
+                           CString& object, DWORD &secure_flag){
+  bool ret = false;
+
+  secure_flag = 0;
+  URL_COMPONENTS parts;
+  memset(&parts, 0, sizeof(parts));
+  TCHAR szHost[10000];
+  TCHAR path[10000];
+  TCHAR extra[10000];
+  TCHAR scheme[100];
+    
+  memset(szHost, 0, sizeof(szHost));
+  memset(path, 0, sizeof(path));
+  memset(extra, 0, sizeof(extra));
+  memset(scheme, 0, sizeof(scheme));
+
+  parts.lpszHostName = szHost;
+  parts.dwHostNameLength = _countof(szHost);
+  parts.lpszUrlPath = path;
+  parts.dwUrlPathLength = _countof(path);
+  parts.lpszExtraInfo = extra;
+  parts.dwExtraInfoLength = _countof(extra);
+  parts.lpszScheme = scheme;
+  parts.dwSchemeLength = _countof(scheme);
+  parts.dwStructSize = sizeof(parts);
+
+  if( InternetCrackUrl((LPCTSTR)url, url.GetLength(), 0, &parts) ){
+      ret = true;
+      host = szHost;
+      port = parts.nPort;
+      object = path;
+      object += extra;
+      if (!host.CompareNoCase(_T("www.webpagetest.org")))
+        host = _T("agent.webpagetest.org");
+      if (!lstrcmpi(scheme, _T("https"))) {
+        secure_flag = INTERNET_FLAG_SECURE |
+                      INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
+                      INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+        if (!port)
+          port = INTERNET_DEFAULT_HTTPS_PORT;
+      } else if (!port)
+        port = INTERNET_DEFAULT_HTTP_PORT;
+  }
+  return ret;
 }

@@ -38,6 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "WebPagetestDOM.h"
 #endif
 #include "chrome_tab_h.h"
+#include "../../../wpthook/dev_tools.h"
 
 #define UWM_UPDATE_WATERFALL	(WM_APP + 2)
 #define UWM_REPAINT_WATERFALL	(WM_APP + 3)
@@ -54,7 +55,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define REQUEST_ACTIVITY_TIMEOUT 30000
 #define FORCE_ACTIVITY_TIMEOUT 240000
 #define DOC_TIMEOUT 1000
-#define AFT_TIMEOUT 240000
 
 typedef void (__stdcall * SETGDIWINDOW)(HWND hWnd, HWND hNotify, UINT msgNotify);
 typedef void (__stdcall * SETGDIWINDOWUPDATED)(bool);
@@ -114,7 +114,7 @@ public:
 class CStatusUpdate
 {
 public:
-	CStatusUpdate(CString stat, __int64 statTime = 0):status(stat), tm(statTime){if(!tm) QueryPerformanceCounter((LARGE_INTEGER *)&tm);}
+	CStatusUpdate(CString stat, __int64 statTime = 0):status(stat), tm(statTime){if(!tm) QueryPerfCounter(tm);}
 	CStatusUpdate(const CStatusUpdate& src){*this = src;}
 	~CStatusUpdate(){}
 	const CStatusUpdate& operator =(const CStatusUpdate& src)
@@ -170,7 +170,6 @@ public:
 	CRITICAL_SECTION			csBackground;
 	bool						active;			// are we currently timing anything
 	bool						available;		// Are we available to time?  Don't if the user hasn't closed the UI
-  bool            capturingAFT; // are we capturing AFT (if so we need to artifically extend the time)?
 	bool						processed;		// have the results been processed?
 	DWORD						abm;			// Activity measurement mode (0 = none, 1 = web 2.0, 2 = auto)
 	DWORD						currentDoc;		// what is the ID of the current document (to assign to objects)?
@@ -198,18 +197,17 @@ public:
   DWORD           imageQuality;
   DWORD           pngScreenShot;
   DWORD           bodies;
+  DWORD           htmlbody;
   DWORD           keepua;
   DWORD           minimumDuration;
   CAtlList<CString>	adPatterns;
-  DWORD           aft;          // above-the fold measurement enabled?
-  DWORD           aftMinChanges;
-  DWORD           aftEarlyCutoff;
 	HWND						hMainWindow;	// main app window
 	HWND		        hBrowserWnd;
 	CString						userAgent;		// custom user agent string
 	CAtlArray<struct in_addr>	dnsServers;		// DNS servers to use for lookups (if overriding the default)
   CAtlList<CCustomRule> customRules;
   DWORD           currentRun;
+	CAtlMap<DWORD, int>	    client_ports;
 
 	// timing support
 	__int64						freq;			// timer frequency
@@ -232,6 +230,13 @@ public:
 	CString						basePageHost;
 	DWORD						ieMajorVer;		// version of IE that is running
   CString         pageTitle;    // title of the page
+  DevTools        dev_tools_;
+  FILETIME        startCPU;
+  FILETIME        docCPU;
+  FILETIME        endCPU;
+  FILETIME        startCPUtotal;
+  FILETIME        docCPUtotal;
+  FILETIME        endCPUtotal;
 
 	// URLBlast support
 	CString	testUrl;
@@ -260,6 +265,7 @@ public:
 	int compressionScore;
 	int etagScore;
   int adultSite;
+	int progressiveJpegScore;
 	
 	// screen shots of various stages
   ScreenCapture screenCapture;
@@ -313,7 +319,11 @@ public:
 	virtual void UpdateRTT(DWORD ipv4_address, long elapsed) = 0;
   virtual void AddAddress(CString host, DWORD address) = 0;
   virtual int GetAddressCount(CString host) = 0;
-	
+  virtual void UpdateClientPort(SOCKET s, DWORD id) = 0;
+  void GetCPUTime(FILETIME &cpu_time, FILETIME &total_time);
+  double GetElapsedMilliseconds(FILETIME &start, FILETIME &end);
+  int GetCPUUtilization(FILETIME &start, FILETIME &end, FILETIME &startTotal, FILETIME &endTotal);
+
 	typedef enum{
 		equal = 0,
 		left = 1,

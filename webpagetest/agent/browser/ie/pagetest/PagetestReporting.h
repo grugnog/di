@@ -85,7 +85,6 @@ public:
   CString   basePageCDN;    // CDN used by the base page (if any)
   CString   basePageRTT;    // RTT for the base page
   DWORD     basePageAddressCount;
-  DWORD     msAFT;      // AFT Time (if we're capturing it)
   DWORD     msVisualComplete; // Visually complete time (only available with video capture)
 
 	DWORD			nDns;			// number of DNS lookups
@@ -122,15 +121,10 @@ public:
 	MIB_TCPSTATS	tcpStatsStart;	// TCP stats at the start of the document
 	MIB_TCPSTATS	tcpStats;		// TCP stats calculated
 	double			tcpRetrans;		// rate of TCP retransmits (basically packet loss)
-	DWORD			labID;
-	DWORD			dialerID;
-	DWORD			connectionType;
 	TCHAR			descriptor[100];
 	TCHAR			logUrl[1000];
 	DWORD			build;
 	CString			version;
-	DWORD			experimental;
-	DWORD			screenShotErrors;
 	DWORD			includeHeader;
 	DWORD			includeObjectData;
 	DWORD			includeObjectData_Now;
@@ -167,7 +161,6 @@ public:
 
 	// internal helpers
 	virtual void	GenerateGUID(void);
-	void cdnLookupThread(DWORD index);
 
 protected:
 	CString	GenerateSummaryStats(void);
@@ -182,6 +175,7 @@ protected:
 	void CheckCookie();
 	void CheckMinify();
 	void CheckImageCompression();
+	void CheckProgressiveJpeg();
 	void CheckEtags();
 	void CheckPageSpeed();
 	void ProtectedCheckPageSpeed();
@@ -190,10 +184,9 @@ protected:
 	void SaveCookies(void);
 	void Log404s(void);
 	void PopulatePageSpeedInput(pagespeed::PagespeedInput* input);
-	void StartCDNLookups(void);
+	void GetNavTiming(long &load_start, long &load_end, long &dcl_start, long &dcl_end, long &first_paint);
+	void SaveUserTiming(CString file);
 	CRITICAL_SECTION csCDN;
-	CAtlArray<CWinInetRequest *> cdnRequests;
-	CAtlArray<HANDLE> hCDNThreads;
 
 	CAtlList<DWORD>	otherResponseCodes;
 	CStringA html;
@@ -209,10 +202,11 @@ private:
   void SaveBodies(CString file);
   void SaveCustomMatches(CString file);
 	void SortEvents();
-  DWORD CalculateAFT();
   void SaveVideo();
   bool ImagesAreDifferent(CxImage * img1, CxImage* img2);
   void SaveHistogram(CxImage& image, CString file);
   CStringA JSONEscape(CStringA src);
+  bool FindJPEGMarker(BYTE * buff, DWORD len, DWORD &pos,
+                      BYTE * &marker, DWORD &marker_len);
 };
 

@@ -128,8 +128,15 @@ public:
   bool  Done();
   void  OverrideDNSName(CString& name);
   ULONG OverrideDNSAddress(CString& name);
+  void  OverridePort(const struct sockaddr FAR * name, int namelen);
   bool  ModifyRequestHeader(CStringA& header) const;
   bool  BlockRequest(CString host, CString object);
+  void  CollectData();
+  void  CollectDataDone();
+  virtual void  ReportData();
+  void Lock();
+  void Unlock();
+  bool IsLocked();
 
   // overall test settings
   CString _id;
@@ -143,14 +150,14 @@ public:
   bool    _ignore_ssl;
   bool    _tcpdump;
   bool    _timeline;
-  bool    _netlog;
   bool    _trace;
+  bool    _netlog;
   bool    _video;
-  bool    _aft;
   bool    _spdy3;
   bool    _noscript;
-  DWORD   _aft_early_cutoff;
-  DWORD   _aft_min_changes;
+  bool    _clear_certs;
+  bool    _emulate_mobile;
+  bool    _force_software_render;
   CString _test_type;
   CString _block;
   DWORD   _bwIn;
@@ -158,6 +165,8 @@ public:
   DWORD   _latency;
   double  _plr;
   CString _browser;
+  CString _browser_url;
+  CString _browser_md5;
   CString _basic_auth;
   CString _script;
   CString _test_file;
@@ -168,6 +177,7 @@ public:
   bool    _png_screen_shot;
   DWORD   _minimum_duration;
   bool    _save_response_bodies;
+  bool    _save_html_body;
   bool    _preserve_user_agent;
   DWORD   _browser_width;
   DWORD   _browser_height;
@@ -175,9 +185,21 @@ public:
   DWORD   _viewport_height;
   CAtlList<CustomRule> _custom_rules;
   DWORD   _activity_timeout;
+  CString _client;
+  CString _device_scale_factor;
+  bool    _continuous_video;
+  CString _browser_command_line;
+  CString _browser_additional_command_line;
+  CStringA  _user_agent;
+  CString _navigated_url;
+  CStringA _test_error;
+  CStringA _run_error;
   
   // current state
   int     _run;
+  int     _specific_run;
+  int     _specific_index;
+  bool    _discard_test;
   int     _index;
   bool    _clear_cache;
   bool    _upload_incremental_results;
@@ -190,6 +212,9 @@ public:
   bool    _dom_element_check;
   int     _no_run;  // conditional block support - if/else/endif
 
+  // system information
+  bool      has_gpu_;
+
   void      BuildScript();
   CAtlList<ScriptCommand> _script_commands;
 
@@ -197,10 +222,13 @@ protected:
   CStringA  EncodeTask(ScriptCommand& command);
   bool      NavigationCommand(CString& command);
   void      FixURL(ScriptCommand& command);
-  bool      ProcessCommand(ScriptCommand& command, bool &consumed);
   bool      PreProcessScriptCommand(ScriptCommand& command);
   bool      ConditionMatches(ScriptCommand& command);
   void      ParseBlockCommand(CString block_list, bool add_head);
+  int       lock_count_;
+  virtual bool ProcessCommand(ScriptCommand& command, bool &consumed);
+
+  CRITICAL_SECTION cs_;
 
   // DNS overrides
   CAtlList<CDNSEntry>	_dns_override;
@@ -210,8 +238,9 @@ protected:
   CAtlList<CString> _block_requests;
 
   // header overrides
-  CStringA  _user_agent;
   CAtlList<HttpHeaderValue> _add_headers;
   CAtlList<HttpHeaderValue> _set_headers;
   CAtlList<HttpHeaderValue> _override_hosts;
+
+  CAtlMap<USHORT, USHORT> _tcp_port_override;
 };

@@ -2,17 +2,19 @@
 #include "wpt_task.h"
 #include "json/json.h"
 
-const char * ACTION_NAVIGATE = "navigate";
+const char * ACTION_BLOCK = "block";
 const char * ACTION_CLEAR_CACHE = "clearCache";
-const char * ACTION_SET_COOKIE = "setCookie";
-const char * ACTION_EXEC = "exec";
 const char * ACTION_CLICK = "click";
+const char * ACTION_COLLECT_STATS = "collectStats";
+const char * ACTION_EXEC = "exec";
+const char * ACTION_EXPIRE_CACHE = "expireCache";
+const char * ACTION_NAVIGATE = "navigate";
+const char * ACTION_SET_COOKIE = "setCookie";
+const char * ACTION_SET_DOM_ELEMENT = "setDomElement";
 const char * ACTION_SET_INNER_HTML = "setInnerHTML";
 const char * ACTION_SET_INNER_TEXT = "setInnerText";
 const char * ACTION_SET_VALUE = "setValue";
 const char * ACTION_SUBMIT_FORM = "submitForm";
-const char * ACTION_BLOCK = "block";
-const char * ACTION_SET_DOM_ELEMENT = "setDomElement";
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
@@ -64,28 +66,32 @@ bool WptTask::ParseTask(CString task) {
         if (!value.empty() && value.isConvertibleTo(Json::stringValue))
           action = value.asCString();
 
-        if (action == ACTION_NAVIGATE)
-          _action = NAVIGATE;
-        else if (action == ACTION_CLEAR_CACHE)
-          _action = CLEAR_CACHE;
-        else if (action == ACTION_SET_COOKIE)
-          _action = SET_COOKIE;
-        else if (action == ACTION_EXEC)
-          _action = EXEC;
-        else if (action == ACTION_CLICK)
-          _action = CLICK;
-        else if (action == ACTION_SET_INNER_HTML)
-          _action = SET_INNER_HTML;
-        else if (action == ACTION_SET_INNER_TEXT)
-          _action = SET_INNER_TEXT;
-        else if (action == ACTION_SET_VALUE)
-          _action = SET_VALUE;
-        else if (action == ACTION_SUBMIT_FORM)
-          _action = SUBMIT_FORM;
-        else if (action == ACTION_BLOCK)
+        if (!action.CompareNoCase(ACTION_BLOCK))
           _action = BLOCK;
-        else if (action == ACTION_SET_DOM_ELEMENT)
+        else if (!action.CompareNoCase(ACTION_CLEAR_CACHE))
+          _action = CLEAR_CACHE;
+        else if (!action.CompareNoCase(ACTION_CLICK))
+          _action = CLICK;
+        else if (!action.CompareNoCase(ACTION_COLLECT_STATS))
+          _action = COLLECT_STATS;
+        else if (!action.CompareNoCase(ACTION_EXEC))
+          _action = EXEC;
+        else if (!action.CompareNoCase(ACTION_EXPIRE_CACHE))
+          _action = EXPIRE_CACHE;
+        else if (!action.CompareNoCase(ACTION_NAVIGATE))
+          _action = NAVIGATE;
+        else if (!action.CompareNoCase(ACTION_SET_COOKIE))
+          _action = SET_COOKIE;
+        else if (!action.CompareNoCase(ACTION_SET_DOM_ELEMENT))
           _action = SET_DOM_ELEMENT;
+        else if (!action.CompareNoCase(ACTION_SET_INNER_HTML))
+          _action = SET_INNER_HTML;
+        else if (!action.CompareNoCase(ACTION_SET_INNER_TEXT))
+          _action = SET_INNER_TEXT;
+        else if (!action.CompareNoCase(ACTION_SET_VALUE))
+          _action = SET_VALUE;
+        else if (!action.CompareNoCase(ACTION_SUBMIT_FORM))
+          _action = SUBMIT_FORM;
 
         if (_action != UNDEFINED)
           _valid = true;

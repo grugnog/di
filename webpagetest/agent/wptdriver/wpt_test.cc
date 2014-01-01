@@ -33,21 +33,33 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "../wpthook/shared_mem.h"
 #include "wpt_settings.h"
 
-static const DWORD AFT_EARLY_CUTOFF_SECS = 25;
-static const DWORD AFT_MIN_CHANGES_THRESHOLD = 100;
-static const DWORD AFT_TIMEOUT = 240000;
 static const DWORD SCRIPT_TIMEOUT_MULTIPLIER = 2;
 static const BYTE JPEG_DEFAULT_QUALITY = 30;
 static const DWORD MS_IN_SEC = 1000;
 static const DWORD BROWSER_WIDTH = 1024;
 static const DWORD BROWSER_HEIGHT = 768;
 
+// Mobile emulation defaults (taken from a Droid RAZR).
+// The height has 36 added pixels to allow for the debugging header.
+static const TCHAR * DEFAULT_MOBILE_SCALE_FACTOR = _T("1.5");
+static const DWORD DEFAULT_MOBILE_WIDTH = 540;
+static const DWORD DEFAULT_MOBILE_HEIGHT = 900;
+static const DWORD CHROME_PADDING_HEIGHT = 115;
+static const DWORD CHROME_PADDING_WIDTH = 4;
+static const char * DEFAULT_MOBILE_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 4.0.4; DROID RAZR "
+    "Build/6.7.2-180_DHD-16_M4-31) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/31.0.1631.1 Mobile Safari/537.36";
+
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-WptTest::WptTest(void):_version(0),
-  _test_timeout(DEFAULT_TEST_TIMEOUT * SECONDS_TO_MS),
-  _activity_timeout(DEFAULT_ACTIVITY_TIMEOUT),
-  _measurement_timeout(DEFAULT_TEST_TIMEOUT) {
+WptTest::WptTest(void):
+  _version(0)
+  ,_test_timeout(DEFAULT_TEST_TIMEOUT * SECONDS_TO_MS)
+  ,_activity_timeout(DEFAULT_ACTIVITY_TIMEOUT)
+  ,_measurement_timeout(DEFAULT_TEST_TIMEOUT)
+  ,has_gpu_(false)
+  ,lock_count_(0) {
   QueryPerformanceFrequency(&_perf_frequency);
 
   // figure out what our working diriectory is
@@ -62,6 +74,8 @@ WptTest::WptTest(void):_version(0),
     CreateDirectory(path, NULL);
     _test_file = CString(path) + _T("\\test.dat");
   }
+  InitializeCriticalSection(&cs_);
+  _tcp_port_override.InitHashTable(257);
 
   Reset();
 }
@@ -69,6 +83,7 @@ WptTest::WptTest(void):_version(0),
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 WptTest::~WptTest(void) {
+  DeleteCriticalSection(&cs_);
 }
 
 /*-----------------------------------------------------------------------------
@@ -87,11 +102,11 @@ void WptTest::Reset(void) {
   _trace = false;
   _netlog = false;
   _video = false;
-  _aft = false;
   _spdy3 = false;
   _noscript = false;
-  _aft_early_cutoff = AFT_EARLY_CUTOFF_SECS;
-  _aft_min_changes = AFT_MIN_CHANGES_THRESHOLD;
+  _clear_certs = false;
+  _emulate_mobile = false;
+  _force_software_render = false;
   _test_type.Empty();
   _block.Empty();
   _bwIn = 0;
@@ -99,9 +114,14 @@ void WptTest::Reset(void) {
   _latency = 0;
   _plr = 0.0;
   _browser.Empty();
+  _browser_url.Empty();
+  _browser_md5.Empty();
   _basic_auth.Empty();
   _script.Empty();
   _run = 0;
+  _specific_run = 0;
+  _specific_index = 0;
+  _discard_test = false;
   _index = 0;
   _clear_cache = true;
   _active = false;
@@ -121,6 +141,7 @@ void WptTest::Reset(void) {
   _dns_name_override.RemoveAll();
   _block_requests.RemoveAll();
   _save_response_bodies = false;
+  _save_html_body = false;
   _preserve_user_agent = false;
   _browser_width = BROWSER_WIDTH;
   _browser_height = BROWSER_HEIGHT;
@@ -128,6 +149,12 @@ void WptTest::Reset(void) {
   _viewport_height = 0;
   _no_run = 0;
   _custom_rules.RemoveAll();
+  _client.Empty();
+  _continuous_video = false;
+  _browser_command_line.Empty();
+  _browser_additional_command_line.Empty();
+  _run_error.Empty();
+  _test_error.Empty();
 }
 
 /*-----------------------------------------------------------------------------
@@ -156,9 +183,15 @@ bool WptTest::Load(CString& test) {
           _url = value.Trim();
         else if (!key.CompareNoCase(_T("fvonly")) && _ttoi(value.Trim()))
           _fv_only = true;
+        else if (!key.CompareNoCase(_T("run")))
+          _specific_run = _ttoi(value.Trim());
+        else if (!key.CompareNoCase(_T("index")))
+          _specific_index = _ttoi(value.Trim());
+        else if (!key.CompareNoCase(_T("discardTest")) && _ttoi(value.Trim()))
+          _discard_test = true;
         else if (!key.CompareNoCase(_T("runs")))
           _runs = _ttoi(value.Trim());
-        else if (!key.CompareNoCase(_T("discard")))
+        else if (!key.CompareNoCase(_T("discard")) && !_specific_run)
           _discard = _ttoi(value.Trim());
         else if (!key.CompareNoCase(_T("web10")) && _ttoi(value.Trim()))
           _doc_complete = true;
@@ -168,23 +201,22 @@ bool WptTest::Load(CString& test) {
           _tcpdump = true;
         else if (!key.CompareNoCase(_T("timeline")) && _ttoi(value.Trim()))
           _timeline = true;
-        else if (!key.CompareNoCase(_T("netlog")) && _ttoi(value.Trim()))
-          _netlog = true;
         else if (!key.CompareNoCase(_T("trace")) && _ttoi(value.Trim()))
           _trace = true;
+        else if (!key.CompareNoCase(_T("netlog")) && _ttoi(value.Trim()))
+          _netlog = true;
         else if (!key.CompareNoCase(_T("spdy3")) && _ttoi(value.Trim()))
           _spdy3 = true;
         else if (!key.CompareNoCase(_T("noscript")) && _ttoi(value.Trim()))
           _noscript = true;
         else if (!key.CompareNoCase(_T("Capture Video")) &&_ttoi(value.Trim()))
           _video = true;
-        else if (!key.CompareNoCase(_T("aft")) && _ttoi(value.Trim())) {
-          _test_timeout = AFT_TIMEOUT;
-          _aft = true;
-        } else if (!key.CompareNoCase(_T("aftEarlyCutoff")))
-          _aft_early_cutoff = _ttoi(value.Trim());
-        else if (!key.CompareNoCase(_T("aftMinChanges")))
-          _aft_min_changes = _ttoi(value.Trim());
+        else if (!key.CompareNoCase(_T("clearcerts")) &&_ttoi(value.Trim()))
+          _clear_certs = true;
+        else if (!key.CompareNoCase(_T("mobile")) &&_ttoi(value.Trim()))
+          _emulate_mobile = true;
+        else if (!key.CompareNoCase(_T("swRender")) &&_ttoi(value.Trim()))
+          _force_software_render = true;
         else if (!key.CompareNoCase(_T("type")))
           _test_type = value.Trim();
         else if (!key.CompareNoCase(_T("block")))
@@ -199,6 +231,10 @@ bool WptTest::Load(CString& test) {
           _plr = _ttof(value.Trim());
         else if (!key.CompareNoCase(_T("browser")))
           _browser = value.Trim();
+        else if (!key.CompareNoCase(_T("customBrowserUrl")))
+          _browser_url = value.Trim();
+        else if (!key.CompareNoCase(_T("customBrowserMD5")))
+          _browser_md5 = value.Trim();
         else if (!key.CompareNoCase(_T("Basic Auth")))
           _basic_auth = value.Trim();
         else if (!key.CompareNoCase(_T("imageQuality")))
@@ -211,8 +247,12 @@ bool WptTest::Load(CString& test) {
                                min(DEFAULT_TEST_TIMEOUT, _ttoi(value.Trim())));
         else if (!key.CompareNoCase(_T("bodies")) && _ttoi(value.Trim()))
           _save_response_bodies = true;
+        else if (!key.CompareNoCase(_T("htmlbody")) && _ttoi(value.Trim()))
+          _save_html_body = true;
         else if (!key.CompareNoCase(_T("keepua")) && _ttoi(value.Trim()))
           _preserve_user_agent = true;
+        else if (!key.CompareNoCase(_T("client")))
+          _client = value.Trim();
         else if (!key.CompareNoCase(_T("customRule"))) {
           int separator = value.Find(_T('='));
           if (separator > 0) {
@@ -231,7 +271,13 @@ bool WptTest::Load(CString& test) {
               }
             }
           }
-        }
+        } else if (!key.CompareNoCase(_T("cmdLine")))
+          _browser_command_line = value;
+        else if (!key.CompareNoCase(_T("addCmdLine")))
+          _browser_additional_command_line = value;
+        else if (!key.CompareNoCase(_T("continuousVideo")) &&
+                 _ttoi(value.Trim()))
+          _continuous_video = true;
       }
     } else if (!line.Trim().CompareNoCase(_T("[Script]"))) {
       // grab the rest of the response as the script
@@ -240,6 +286,10 @@ bool WptTest::Load(CString& test) {
     }
 
     line = test.Tokenize(_T("\r\n"), linePos);
+  }
+
+  if (_specific_run) {
+    _discard = 0;
   }
 
   if (_script.GetLength())
@@ -259,9 +309,10 @@ bool WptTest::Load(CString& test) {
 bool WptTest::GetNextTask(CStringA& task, bool& record) {
   bool ret = false;
 
+  EnterCriticalSection(&cs_);
   WptTrace(loglevel::kFunction, _T("[wpthook] - WptTest::GetNextTask\n"));
-
-  if (!_active){
+  if (!_active && !IsLocked()){
+    Lock();
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if( !_sleep_end.QuadPart || now.QuadPart >= _sleep_end.QuadPart) {
@@ -283,7 +334,9 @@ bool WptTest::GetNextTask(CStringA& task, bool& record) {
         }
       }
     }
+    Unlock();
   }
+  LeaveCriticalSection(&cs_);
 
   return ret;
 }
@@ -401,13 +454,6 @@ void WptTest::BuildScript() {
     _script_commands.AddTail(command);
   }
 
-  if (_clear_cache) {
-      ScriptCommand command;
-      command.command = _T("clearCache");
-      command.record = false;
-      _script_commands.AddHead(command);
-  }
-
   if (_block.GetLength() ) {
     ParseBlockCommand(_block, true);
   }
@@ -419,11 +465,52 @@ void WptTest::BuildScript() {
     _script_commands.AddHead(command);
   }
 
+  if (_trace) {
+    ScriptCommand command;
+    command.command = _T("captureTrace");
+    command.record = false;
+    _script_commands.AddHead(command);
+  }
+
   if (_noscript) {
     ScriptCommand command;
     command.command = _T("noscript");
     command.record = false;
     _script_commands.AddHead(command);
+  }
+
+  if (_emulate_mobile) {
+    if (_device_scale_factor.IsEmpty())
+      _device_scale_factor = DEFAULT_MOBILE_SCALE_FACTOR;
+    if (!_viewport_width && !_viewport_height) {
+      DWORD padding_width = CHROME_PADDING_WIDTH;
+      DWORD padding_height = CHROME_PADDING_HEIGHT;
+      double scale = _ttof(_device_scale_factor);
+      if (scale >= 0.5 && scale <= 10.0) {
+        padding_width = (int)((double)padding_width * scale);
+        padding_height = (int)((double)padding_height * scale);
+      }
+      _browser_width = DEFAULT_MOBILE_WIDTH + padding_width;
+      _browser_height = DEFAULT_MOBILE_HEIGHT + padding_height;
+    }
+    if (_user_agent.IsEmpty())
+      _user_agent = DEFAULT_MOBILE_USER_AGENT;
+  }
+
+  // Scale the viewport or browser size by the scale factor.
+  // Once the viewport scaling is ACTUALLY working in Chrome then we can ues it
+  // but as of right now it isn't.
+  if (!has_gpu_ && _device_scale_factor.GetLength()) {
+    double scale = _ttof(_device_scale_factor);
+    _device_scale_factor.Empty();
+    if (scale >= 0.5 && scale <= 10.0) {
+      _browser_width = (int)((double)_browser_width / scale);
+      _browser_height = (int)((double)_browser_height / scale);
+      if (_viewport_width)
+        _viewport_width = (int)((double)_viewport_width / scale);
+      if (_viewport_height)
+        _viewport_height = (int)((double)_viewport_height / scale);
+    }
   }
 }
 
@@ -488,6 +575,10 @@ bool WptTest::ProcessCommand(ScriptCommand& command, bool &consumed) {
       _log_data = true;
     else
       _log_data = false;
+  } else if (cmd == _T("navigate")) {
+    _navigated_url = command.target;
+    continue_processing = false;
+    consumed = false;
   } else if (cmd == _T("sleep")) {
     int seconds = _ttoi(command.target);
     if (seconds > 0) {
@@ -511,17 +602,38 @@ bool WptTest::ProcessCommand(ScriptCommand& command, bool &consumed) {
       HttpHeaderValue header(tag, value, (LPCSTR)CT2A(command.value.Trim()));
       _add_headers.AddTail(header);
     }
+    continue_processing = false;
+    consumed = false;
   } else if (cmd == _T("setheader")) {
     int pos = command.target.Find(_T(':'));
     if (pos > 0) {
       CStringA tag = CT2A(command.target.Left(pos).Trim());
       CStringA value = CT2A(command.target.Mid(pos + 1).Trim());
-      HttpHeaderValue header(tag, value, (LPCSTR)CT2A(command.value.Trim()));
-      _set_headers.AddTail(header);
+      CStringA filter = CT2A(command.value.Trim());
+      bool repeat = false;
+      if (!_set_headers.IsEmpty()) {
+        POSITION pos = _set_headers.GetHeadPosition();
+        while (pos && !repeat) {
+          HttpHeaderValue &header = _set_headers.GetNext(pos);
+          if (!header._tag.CompareNoCase(tag) &&
+              header._filter == filter) {
+            repeat = true;
+            header._value = value;
+          }
+        }
+      }
+      if (!repeat) {
+        HttpHeaderValue header(tag, value, filter);
+        _set_headers.AddTail(header);
+      }
     }
+    continue_processing = false;
+    consumed = false;
   } else if (cmd == _T("resetheaders")) {
     _add_headers.RemoveAll();
     _set_headers.RemoveAll();
+    continue_processing = false;
+    consumed = false;
   } else if (cmd == _T("overridehost")) {
     CStringA host = CT2A(command.target.Trim());
     CStringA new_host = CT2A(command.value.Trim());
@@ -557,6 +669,7 @@ bool WptTest::ProcessCommand(ScriptCommand& command, bool &consumed) {
       WptTrace(loglevel::kFrequentEvent, 
         _T("[wpthook] - WptTest::BuildScript() Setting dom element check."));
     }
+    continue_processing = false;
     consumed = false;
   } else if(cmd == _T("addcustomrule")) {
     int separator = command.target.Find(_T('='));
@@ -567,6 +680,10 @@ bool WptTest::ProcessCommand(ScriptCommand& command, bool &consumed) {
       new_rule._regex = command.value.Trim();
       _custom_rules.AddTail(new_rule);
     }
+  } else if(cmd == _T("reportdata")) {
+    ReportData();
+    continue_processing = false;
+    consumed = false;
   } else {
     continue_processing = false;
     consumed = false;
@@ -606,6 +723,11 @@ bool WptTest::PreProcessScriptCommand(ScriptCommand& command) {
     } else if (cmd == _T("setdns")) {
       CDNSEntry entry(command.target, command.value);
       _dns_override.AddTail(entry);
+    } else if (cmd == _T("setport")) {
+      USHORT original = (USHORT)_ttoi(command.target);
+      USHORT replacement = (USHORT)_ttoi(command.value);
+      if (original && replacement)
+        _tcp_port_override.SetAt(original, replacement);
     } else if (cmd == _T("setdnsname")) {
       CDNSName entry(command.target, command.value);
       if (entry.name.GetLength() && entry.realName.GetLength())
@@ -624,6 +746,19 @@ bool WptTest::PreProcessScriptCommand(ScriptCommand& command) {
         _viewport_width = (DWORD)width;
         _viewport_height = (DWORD)height;
       }
+    } else if (cmd == _T("setdevicescalefactor")) {
+      _device_scale_factor = _T("");
+      for (int i = 0; i < command.target.GetLength(); i++) {
+        TCHAR ch = command.target.GetAt(i);
+        if (ch == _T('0') || ch == _T('1') || ch == _T('2') || ch == _T('3') ||
+            ch == _T('4') || ch == _T('5') || ch == _T('6') || ch == _T('7') ||
+            ch == _T('8') || ch == _T('9') || ch == _T('.'))
+          _device_scale_factor += ch;
+        else
+          break;
+      }
+      if (!_device_scale_factor.GetLength())
+        _device_scale_factor.Empty();
     } else {
       processed = false;
     }
@@ -672,6 +807,24 @@ ULONG WptTest::OverrideDNSAddress(CString& name) {
 }
 
 /*-----------------------------------------------------------------------------
+  See if we need to override the Port
+-----------------------------------------------------------------------------*/
+void WptTest::OverridePort(const struct sockaddr FAR * name, int namelen) {
+  if (!_tcp_port_override.IsEmpty() &&
+      name &&
+      namelen >= sizeof(struct sockaddr_in) &&
+      name->sa_family == AF_INET) {
+    struct sockaddr_in* ip_name = (struct sockaddr_in *)name;
+    USHORT current_port = htons(ip_name->sin_port);
+    USHORT new_port = 0;
+    if (_tcp_port_override.Lookup(current_port, new_port) && new_port) {
+      new_port = htons(new_port);
+      ip_name->sin_port = new_port;
+    }
+  }
+}
+
+/*-----------------------------------------------------------------------------
   Modify an outbound request header.  The modifications can include:
   - Including PTST in the user agent string
   - Adding new headers
@@ -708,11 +861,13 @@ bool WptTest::ModifyRequestHeader(CStringA& header) const {
     pos = _set_headers.GetHeadPosition();
     while (pos) {
       HttpHeaderValue new_header = _set_headers.GetNext(pos);
-      new_headers += CStringA("\r\n") + new_header._tag + CStringA(": ") + 
-                      new_header._value;
-      if (!new_header._tag.CompareNoCase("Host")) {
-        header.Empty();
-        new_headers.TrimLeft();
+      if (RegexMatch(value, new_header._filter)) {
+        new_headers += CStringA("\r\n") + new_header._tag + CStringA(": ") + 
+                        new_header._value;
+        if (!new_header._tag.CompareNoCase("Host")) {
+          header.Empty();
+          new_headers.TrimLeft();
+        }
       }
     }
     // Override the Host header for specified hosts
@@ -769,9 +924,8 @@ bool WptTest::BlockRequest(CString host, CString object) {
 bool WptTest::ConditionMatches(ScriptCommand& command) {
   bool match = false;
   int cached = 1;
-  if (_clear_cache) {
+  if (_clear_cache)
     cached = 0;
-  }
 
   if (!command.target.CompareNoCase(_T("run"))) {
     if (_run == _ttoi(command.value)) {
@@ -804,4 +958,75 @@ void WptTest::ParseBlockCommand(CString block_list, bool add_head) {
       }
     }
   }
+}
+
+/*-----------------------------------------------------------------------------
+  The test is finished, insert the 2 dummy commands into the top of the
+  script to collect data (these are added to the head so they are in reverse
+  order from how they execute)
+-----------------------------------------------------------------------------*/
+void  WptTest::CollectData() {
+  ScriptCommand cmd;
+
+  // Add the command that lets us know we have collected all of the data and it
+  // is time to report back
+  cmd.command = _T("reportdata");
+  _script_commands.AddHead(cmd);
+
+  // If we are at the end of the script, run the responsive site check
+  if (_script_commands.GetCount() == 1) {
+    cmd.command = _T("checkresponsive");
+    _script_commands.AddHead(cmd);
+
+    cmd.command = _T("resizeresponsive");
+    _script_commands.AddHead(cmd);
+  }
+
+  // Add the command to trigger the browser to collect in-page stats
+  // (before doing a responsive check where we resize the window)
+  cmd.command = _T("collectstats");
+  _script_commands.AddHead(cmd);
+}
+
+/*-----------------------------------------------------------------------------
+  Overridden in the hook-version to actually report the test data
+-----------------------------------------------------------------------------*/
+void WptTest::ReportData() {
+}
+
+/*-----------------------------------------------------------------------------
+  Remove any of our fake data collection commands if they are at the head of
+  the script command queue;
+-----------------------------------------------------------------------------*/
+void WptTest::CollectDataDone() {
+  bool removed = false;
+  do {
+    removed = false;
+    if (!_script_commands.IsEmpty()) {
+      ScriptCommand &cmd = _script_commands.GetHead();
+      if (cmd.command == _T("reportdata") ||
+          cmd.command == _T("collectstats")) {
+        _script_commands.RemoveHead();
+        removed = true;
+      }
+    }
+  } while(removed);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void WptTest::Lock() {
+  lock_count_++;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void WptTest::Unlock() {
+  lock_count_--;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+bool WptTest::IsLocked() {
+  return lock_count_ != 0;
 }

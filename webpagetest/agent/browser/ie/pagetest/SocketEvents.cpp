@@ -39,12 +39,17 @@ CSocketEvents::CSocketEvents(void):
 	, bwBytesIn(0)
 {
   rtt.InitHashTable(257);
+  socketID.InitHashTable(257);
+  schannelIds.InitHashTable(257);
+  schannelSockets.InitHashTable(257);
+  InitializeCriticalSection(&socket_cs);
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 CSocketEvents::~CSocketEvents(void)
 {
+  DeleteCriticalSection(&socket_cs);
 }
 
 /*-----------------------------------------------------------------------------
@@ -130,6 +135,13 @@ void CSocketEvents::CloseSocket(SOCKET s)
 	socketID.RemoveKey((UINT_PTR)s);
 	
 	LeaveCriticalSection(&cs);
+
+	void * schannelId = GetSchannelId(s);
+	EnterCriticalSection(&socket_cs);
+	if (schannelId)
+		schannelSockets.RemoveKey(schannelId);
+	schannelIds.RemoveKey(s);
+	LeaveCriticalSection(&socket_cs);
 }
 
 #pragma warning(pop)
@@ -146,16 +158,11 @@ void CSocketEvents::SocketSend(SOCKET s, DWORD len, LPBYTE buff)
 		
 		if(!IsFakeSocket(s, len, buff) )
 		{
-      ATLTRACE(_T("[Pagetest] - (0x%08X) CWatchDlg::SocketSend - socket %d, currentDoc = %d\n"), GetCurrentThreadId(), s, currentDoc);
+      ATLTRACE(_T("[Pagetest] - (0x%08X) CWatchDlg::SocketSend - %d bytes socket %d, currentDoc = %d\n"), len, GetCurrentThreadId(), s, currentDoc);
 
       // last chance to override host headers (redirect case)
       ModifyDataOut(buff, len);
 	        
-      // figure out what the client port is
-      struct sockaddr_in local;
-      int localLen = sizeof(local);
-      getsockname(s, (sockaddr *)&local, &localLen);
-
 			// see if this socket had an existing connect.  If so, end that now
 			EnterCriticalSection(&cs);
 			POSITION pos = connects.GetHeadPosition();
@@ -194,15 +201,6 @@ void CSocketEvents::SocketSend(SOCKET s, DWORD len, LPBYTE buff)
 				bool cont = false;
 				if( !request->in )
 					cont = true;
-				else if( ((request->linkedRequest && request->linkedRequest->secure) || request->port == 443) && request->connect )
-				{
-					// do some checking to see if we're past the SSL handshake
-					if( !(request->connect->state % 2) )
-						request->connect->state++;
-						
-					if( request->connect->state <= 3 )
-						cont = true;
-				}
 					
 				// Do we continue the existing request?
 				if( cont )
@@ -242,7 +240,11 @@ void CSocketEvents::SocketSend(SOCKET s, DWORD len, LPBYTE buff)
 					request->ipAddress[3] = soc->ipAddress[3];
 					request->port = soc->port;
 					request->socketId = soc->id;
-				}
+					UpdateClientPort(s, soc->id);
+          ATLTRACE(_T("[%d] - CWatchDlg::SocketSend - New request to %d.%d.%d.%d:%d\n"), s, soc->ipAddress[0], soc->ipAddress[1], soc->ipAddress[2], soc->ipAddress[3], soc->port);
+        } else {
+          ATLTRACE(_T("[%d] - CWatchDlg::SocketSend - Failed to find matching socket info\n"), s);
+        }
 				
 				// find the connection this is tied to
 				POSITION pos = events.GetHeadPosition();
@@ -318,9 +320,9 @@ void CSocketEvents::SocketRecv(SOCKET s, DWORD len, LPBYTE buff)
 		if( !IsFakeSocket(s,0,0) )
 		{
 			__int64 now;
-			QueryPerformanceCounter((LARGE_INTEGER *)&now);
+			QueryPerfCounter(now);
 
-	        ATLTRACE(_T("[Pagetest] - (0x%08X) CWatchDlg::SocketRecv - socket %d, %d bytes, open requests = %d\n"), GetCurrentThreadId(), s, len, openRequests);
+      ATLTRACE(_T("[Pagetest] - (0x%08X) CWatchDlg::SocketRecv - socket %d, %d bytes, open requests = %d\n"), GetCurrentThreadId(), s, len, openRequests);
 
 			bool repaint = false;
 			bwBytesIn += len;	// update the bandwidth info
@@ -344,15 +346,12 @@ void CSocketEvents::SocketRecv(SOCKET s, DWORD len, LPBYTE buff)
 					r->in += len;
 					r->response.AddData(len, buff);
 					
-					// toggle the ssl state
-					if( ((r->linkedRequest && r->linkedRequest->secure) || r->port == 443) && r->connect && r->connect->state % 2 )
-						r->connect->state++;
-
 					// update the end time of the linked request
 					if( r->linkedRequest )
 					{
 						r->linkedRequest->Done();
 						r->linkedRequest->in = r->in;
+						lastActivity = now;
 					}
 
 					// update the end time (this can be done multiple times)
@@ -402,26 +401,7 @@ void CSocketEvents::SocketConnect(SOCKET s, struct sockaddr_in * addr)
 		ATLTRACE(_T("[Pagetest] - (0x%08X) CWatchDlg::SocketConnect - socket %d, currentDoc = %d\n"), GetCurrentThreadId(), s, currentDoc);
 		
 		CheckStuff();
-		
-		// see if we have to bind the socket to a particular interface
-		// make sure it's not the loopback socket
-		if( bindAddr && addr->sin_addr.S_un.S_addr != 0x0100007F )
-		{
-			sockaddr_in name;
-			name.sin_family = AF_INET;
-			name.sin_addr.S_un.S_addr = bindAddr;
-			name.sin_port = 0;
-			
-			if (!bind(s, (sockaddr *)&name, sizeof(name)))
-			{
-				ATLTRACE(_T("[Pagetest] - bind successful\n"));
-			}
-			else
-			{
-				ATLTRACE(_T("[Pagetest] - bind failed : %d\n"), WSAGetLastError());
-			}
-		}
-		
+
 		EnterCriticalSection(&cs);
 
 		// find which DNS entry this socket came from (only the first socket to claim a DNS entry wins)
@@ -479,6 +459,7 @@ void CSocketEvents::SocketConnect(SOCKET s, struct sockaddr_in * addr)
 -----------------------------------------------------------------------------*/
 void CSocketEvents::SocketConnected(SOCKET s)
 {
+    DWORD id = 0;
 		EnterCriticalSection(&cs);
 		POSITION pos = connects.GetHeadPosition();
 		while( pos )
@@ -487,6 +468,7 @@ void CSocketEvents::SocketConnected(SOCKET s)
 			CSocketConnect * c = connects.GetNext(pos);
 			if( c && !c->end && c->s == s)
 			{
+			  id = c->socketId;
 				c->Done();
         UpdateRTT(c);
 				
@@ -496,23 +478,14 @@ void CSocketEvents::SocketConnected(SOCKET s)
 			}
 		}
 		LeaveCriticalSection(&cs);
+		if (id)
+		  UpdateClientPort(s, id);
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void CSocketEvents::SocketBind(SOCKET s, struct sockaddr_in * addr)
 {
-	// make sure we are timing something
-	if( active )
-	{
-		// see if we have to bind the socket to a particular interface
-		// make sure it's not the loopback socket
-		if( bindAddr && addr && addr->sin_addr.S_un.S_addr != 0x0100007F )
-		{
-			ATLTRACE(_T("[Pagetest] - changing bind address\n"));
-			addr->sin_addr.S_un.S_addr = bindAddr;
-		}
-	}
 }
 
 /*-----------------------------------------------------------------------------
@@ -710,4 +683,48 @@ CString CSocketEvents::GetRTT(DWORD ipv4_address)
     }
   }
   return ret;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CSocketEvents::MapSchannelSocket(void * schannelId, SOCKET s) {
+  EnterCriticalSection(&socket_cs);
+  schannelIds.SetAt(s, schannelId);
+  schannelSockets.SetAt(schannelId, s);
+  LeaveCriticalSection(&socket_cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+SOCKET CSocketEvents::GetSchannelSocket(void * schannelId){
+  SOCKET s = INVALID_SOCKET;
+  EnterCriticalSection(&socket_cs);
+  schannelSockets.Lookup(schannelId, s);
+  LeaveCriticalSection(&socket_cs);
+  return s;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void * CSocketEvents::GetSchannelId(SOCKET s){
+  void * schannelId = NULL;
+  EnterCriticalSection(&socket_cs);
+  schannelIds.Lookup(s, schannelId);
+  LeaveCriticalSection(&socket_cs);
+  return schannelId;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CSocketEvents::UpdateClientPort(SOCKET s, DWORD id) {
+  struct sockaddr_in client;
+  int addrlen = sizeof(client);
+  if(getsockname(s, (struct sockaddr *)&client, &addrlen) == 0 &&
+     client.sin_family == AF_INET &&
+     addrlen == sizeof(client)) {
+    int localPort = ntohs(client.sin_port);
+    EnterCriticalSection(&cs);
+    client_ports.SetAt(id, localPort);
+    LeaveCriticalSection(&cs);
+  }
 }

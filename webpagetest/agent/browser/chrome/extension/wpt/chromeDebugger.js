@@ -33,7 +33,13 @@ goog.provide('wpt.chromeDebugger');
 
 ((function() {  // namespace
 
-var g_instance = {connected: false, timeline: false, timelineConnected: false};
+var g_instance = {connected: false,
+                  timeline: false,
+                  active: false,
+                  receivedData: false};
+var TIMELINE_AGGREGATION_INTERVAL = 500;
+var TIMELINE_START_TIMEOUT = 10000;
+var TRACING_START_TIMEOUT = 10000;
 
 /**
  * Construct an object that connectes to the Chrome debugger.
@@ -47,109 +53,180 @@ var g_instance = {connected: false, timeline: false, timelineConnected: false};
  *                           in an extension.  Tests may pass in a mock
  *                           object.
  */
-wpt.chromeDebugger.Init = function(tabId, chromeApi) {
+wpt.chromeDebugger.Init = function(tabId, chromeApi, callback) {
   try {
     g_instance.tabId_ = tabId;
     g_instance.chromeApi_ = chromeApi;
+    g_instance.startedCallback = callback;
+    g_instance.timelineStartedCallback = undefined;
+    g_instance.tracingStartedCallback = undefined;
+    g_instance.devToolsData = '';
+    g_instance.devToolsTimer = undefined;
     var version = '1.0';
-    if (g_instance.chromeApi_['debugger']) {
+    if (g_instance.chromeApi_['debugger'])
         g_instance.chromeApi_.debugger.attach({tabId: g_instance.tabId_}, version, wpt.chromeDebugger.OnAttachDebugger);
-    } else if (g_instance.chromeApi_.experimental['debugger']) {
-      // deal with the different function signatures for different chrome versions
-      try {
-        g_instance.chromeApi_.experimental.debugger.attach(g_instance.tabId_, wpt.chromeDebugger.OnAttachOld);
-      } catch (err) {
-        version = '0.1';
-        g_instance.chromeApi_.experimental.debugger.attach({tabId: g_instance.tabId_}, version, wpt.chromeDebugger.OnAttachExperimental);
-      }
-    }
   } catch (err) {
     wpt.LOG.warning('Error initializing debugger interfaces: ' + err);
   }
 };
 
+wpt.chromeDebugger.SetActive = function(active) {
+  g_instance.devToolsData = '';
+  g_instance.requests = {};
+  g_instance.receivedData = false;
+  g_instance.active = active;
+};
+
 /**
  * Capture the network timeline
  */
-wpt.chromeDebugger.CaptureTimeline = function() {
+wpt.chromeDebugger.CaptureTimeline = function(callback) {
   g_instance.timeline = true;
-  if (g_instance.connected) {
-    try {
-      if (g_instance.chromeApi_['debugger']) {
-        g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Timeline.start');
-      } else if (g_instance.chromeApi_.experimental['debugger']) {
-        g_instance.chromeApi_.experimental.debugger.sendRequest(g_instance.tabId_, 'Timeline.start');
+  g_instance.timelineStartedCallback = callback;
+  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Timeline.start', null, function(){
+    setTimeout(function(){
+      if (g_instance.timelineStartedCallback) {
+        g_instance.timelineStartedCallback();
+        g_instance.timelineStartedCallback = undefined;
       }
-      g_instance.timelineConnected = true;
-    } catch (err) {
-      wpt.LOG.warning('Error starting timeline capture (already connected): ' + err);
-    }
-  }
-}
+    }, TIMELINE_START_TIMEOUT);
+  });
+};
+
+/**
+ * Capture a trace
+ */
+wpt.chromeDebugger.CaptureTrace = function(callback) {
+  g_instance.tracingStartedCallback = callback;
+  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Tracing.start', null, function(){
+    setTimeout(function(){
+      if (g_instance.tracingStartedCallback) {
+        g_instance.tracingStartedCallback();
+        g_instance.tracingStartedCallback = undefined;
+      }
+    }, TRACING_START_TIMEOUT);
+  });
+};
 
 /**
  * Actual message callback
  */
 wpt.chromeDebugger.OnMessage = function(tabId, message, params) {
-  // Network events
-  if (message === 'Network.requestWillBeSent') {
-    if (params.request.url.indexOf('http') == 0) {
-      var detail = {};
-      detail.url = params.request.url;
-      detail.initiator = params.initiator;
-      detail.startTime = params.timestamp;
-      if (params['request'] !== undefined) {
-        detail.request = params.request;
+  // timeline and tracing starts seem to have a delay in startup
+  // and don't really start when the callback completes
+  if (g_instance.timelineStartedCallback &&
+      message === 'Timeline.eventRecorded') {
+    g_instance.timelineStartedCallback();
+    g_instance.timelineStartedCallback = undefined;
+  }
+  if (g_instance.tracingStartedCallback &&
+      message === 'Tracing.dataCollected') {
+    g_instance.tracingStartedCallback();
+    g_instance.tracingStartedCallback = undefined;
+  }
+  if (message === 'Tracing.dataCollected')
+    console.log(params);
+
+    // actual message recording
+  if (g_instance.active) {
+    // keep track of all of the dev tools messages
+    if (g_instance.timeline) {
+      if (g_instance.devToolsData.length)
+        g_instance.devToolsData += ',';
+      g_instance.devToolsData += '{"method":"' + message + '","params":' + JSON.stringify(params) + '}';
+      if (g_instance.devToolsTimer == undefined)
+        g_instance.devToolsTimer = setTimeout(wpt.chromeDebugger.SendDevToolsData, TIMELINE_AGGREGATION_INTERVAL);
+    }
+    
+    // Network events
+    if (message === 'Network.requestWillBeSent') {
+      if (params.request.url.indexOf('http') == 0) {
+        // see if it is a redirect
+        if (params['redirectResponse'] !== undefined &&
+            g_instance.requests[params.requestId] !== undefined) {
+          if (!g_instance.receivedData)
+            wpt.chromeDebugger.SendReceivedData();
+          if (!params.redirectResponse.fromDiskCache &&
+              g_instance.requests[params.requestId]['fromNet'] !== false) {
+            g_instance.requests[params.requestId].fromNet = true;
+            if (g_instance.requests[params.requestId]['firstByteTime'] === undefined) {
+              g_instance.requests[params.requestId].firstByteTime = params.timestamp;
+            }
+            g_instance.requests[params.requestId].response = params.redirectResponse;
+            request = g_instance.requests[params.requestId];
+            request.endTime = params.timestamp;
+            wpt.chromeDebugger.sendRequestDetails(request);
+          }
+          delete g_instance.requests[params.requestId];
+        }
+        var detail = {};
+        detail.url = params.request.url;
+        detail.initiator = params.initiator;
+        detail.startTime = params.timestamp;
+        if (params['request'] !== undefined)
+          detail.request = params.request;
+        g_instance.requests[params.requestId] = detail;
       }
-      g_instance.requests[params.requestId] = detail;
-    }
-  } else if (message === 'Network.dataReceived') {
-    if (g_instance.requests[params.requestId] !== undefined &&
-        g_instance.requests[params.requestId]['firstByteTime'] === undefined) {
-      g_instance.requests[params.requestId].firstByteTime = params.timestamp;
-    }
-  } else if (message === 'Network.responseReceived') {
-    if (!params.response.fromDiskCache &&
-        g_instance.requests[params.requestId] !== undefined) {
-      g_instance.requests[params.requestId].fromNet = true;
-      if (g_instance.requests[params.requestId]['firstByteTime'] === undefined) {
-        g_instance.requests[params.requestId].firstByteTime = params.timestamp;
+    } else if (message === 'Network.dataReceived') {
+      if (g_instance.requests[params.requestId] !== undefined) {
+        if (!g_instance.receivedData)
+          wpt.chromeDebugger.SendReceivedData();
+        if (g_instance.requests[params.requestId]['firstByteTime'] === undefined)
+          g_instance.requests[params.requestId].firstByteTime = params.timestamp;
+        if (g_instance.requests[params.requestId]['bytesIn'] === undefined)
+          g_instance.requests[params.requestId]['bytesIn'] = 0;
+        if (params['encodedDataLength'] !== undefined && params.encodedDataLength > 0)
+          g_instance.requests[params.requestId]['bytesIn'] += params.encodedDataLength;
       }
-      g_instance.requests[params.requestId].response = params.response;
+    } else if (message === 'Network.responseReceived') {
+      if (!g_instance.receivedData)
+        wpt.chromeDebugger.SendReceivedData();
+      if (!params.response.fromDiskCache &&
+          g_instance.requests[params.requestId] !== undefined &&
+          g_instance.requests[params.requestId]['fromNet'] !== false) {
+        g_instance.requests[params.requestId].fromNet = true;
+        if (g_instance.requests[params.requestId]['firstByteTime'] === undefined) {
+          g_instance.requests[params.requestId].firstByteTime = params.timestamp;
+        }
+        g_instance.requests[params.requestId].response = params.response;
+      }
+    } else if (message === 'Network.requestServedFromCache') {
+      if (!g_instance.receivedData)
+        wpt.chromeDebugger.SendReceivedData();
+      if (g_instance.requests[params.requestId] !== undefined)
+        g_instance.requests[params.requestId].fromNet = false;
+    } else if (message === 'Network.loadingFinished') {
+      if (!g_instance.receivedData)
+        wpt.chromeDebugger.SendReceivedData();
+      if (g_instance.requests[params.requestId] !== undefined) {
+        if (g_instance.requests[params.requestId]['fromNet']) {
+          request = g_instance.requests[params.requestId];
+          request.endTime = params.timestamp;
+          wpt.chromeDebugger.sendRequestDetails(request);
+        }
+        delete g_instance.requests[params.requestId];
+      }
+    } else if (message === 'Network.loadingFailed') {
+      if (g_instance.requests[params.requestId] !== undefined) {
+        request = g_instance.requests[params.requestId];
+        request.endTime = params.timestamp;
+        request.error = params.errorText;
+        request.errorCode =
+            wpt.chromeExtensionUtils.netErrorStringToWptCode(request.error);
+        wpt.chromeDebugger.sendRequestDetails(request);
+        delete g_instance.requests[params.requestId];
+      }
     }
-  } else if (message === 'Network.loadingFinished') {
-    if (g_instance.requests[params.requestId] !== undefined &&
-        g_instance.requests[params.requestId]['fromNet']) {
-      request = g_instance.requests[params.requestId];
-      request.endTime = params.timestamp;
-      wpt.chromeDebugger.sendRequestDetails(request);
-    }
-  } else if (message === 'Network.loadingFailed') {
-    if (g_instance.requests[params.requestId] !== undefined) {
-      request = g_instance.requests[params.requestId];
-      request.endTime = params.timestamp;
-      request.error = params.errorText;
-      request.errorCode =
-          wpt.chromeExtensionUtils.netErrorStringToWptCode(request.error);
-      wpt.chromeDebugger.sendRequestDetails(request);
-    }
   }
+};
 
-  // console events
-  else if (message === 'Console.messageAdded') {
-    wpt.chromeDebugger.sendEvent('console_log', JSON.stringify(params.message));
+wpt.chromeDebugger.SendDevToolsData = function() {
+  g_instance.devToolsTimer = undefined;
+  if (g_instance.devToolsData.length) {
+    wpt.chromeDebugger.sendEvent('devTools', g_instance.devToolsData);
+    g_instance.devToolsData = '';
   }
-
-  // Timeline
-  else if (message === 'Timeline.eventRecorded') {
-    wpt.chromeDebugger.sendEvent('timeline', JSON.stringify(params.record));
-  }
-
-  // Page events
-  else if (message === 'Page.loadEventFired') {
-    wpt.chromeDebugger.sendEvent('load?timestamp=' + params.timestamp, '');
-  }
-}
+};
 
 /**
  * Attached using the 1.0 released interface
@@ -163,56 +240,14 @@ wpt.chromeDebugger.OnAttachDebugger = function() {
   g_instance.chromeApi_.debugger.onEvent.addListener(wpt.chromeDebugger.OnMessage);
 
   // start the different interfaces we are interested in monitoring
-  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Network.enable');
-  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Console.enable');
-  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Page.enable');
-  if (g_instance.timeline && !g_instance.timelineConnected) {
-    g_instance.timelineConnected = true;
-    g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Timeline.start');
-  }
-}
-
-/**
- * Attached using the old experimental interface
- */
-wpt.chromeDebugger.OnAttachOld = function() {
-  wpt.LOG.info('attached to debugger old experimental extension interface');
-  g_instance.connected = true;
-  g_instance.requests = {};
-
-  // attach the event listener
-  g_instance.chromeApi_.experimental.debugger.onEvent.addListener(wpt.chromeDebugger.OnMessage);
-
-  // start the different interfaces we are interested in monitoring
-  g_instance.chromeApi_.experimental.debugger.sendRequest(g_instance.tabId_, 'Network.enable');
-  g_instance.chromeApi_.experimental.debugger.sendRequest(g_instance.tabId_, 'Console.enable');
-  g_instance.chromeApi_.experimental.debugger.sendRequest(g_instance.tabId_, 'Page.enable');
-  if (g_instance.timeline && !g_instance.timelineConnected) {
-    g_instance.timelineConnected = true;
-    g_instance.chromeApi_.experimental.debugger.sendRequest(g_instance.tabId_, 'Timeline.start');
-  }
-}
-
-/**
- * Attached using the new experimental interface
- */
-wpt.chromeDebugger.OnAttachExperimental = function() {
-  wpt.LOG.info('attached to debugger experimental extension interface');
-  g_instance.requests = {};
-
-  // attach the event listener
-  g_instance.chromeApi_.experimental.debugger.onEvent.addListener(wpt.chromeDebugger.OnMessage);
-
-  // start the different interfaces we are interested in monitoring
-  g_instance.chromeApi_.experimental.debugger.sendCommand({tabId: g_instance.tabId_}, 'Network.enable');
-  g_instance.chromeApi_.experimental.debugger.sendCommand({tabId: g_instance.tabId_}, 'Console.enable');
-  g_instance.chromeApi_.experimental.debugger.sendCommand({tabId: g_instance.tabId_}, 'Page.enable');
-  // the timeline is pretty resource intensive so it is optional
-  if (g_instance.timeline && !g_instance.timelineConnected) {
-    g_instance.timelineConnected = true;
-    g_instance.chromeApi_.experimental.debugger.sendCommand({tabId: g_instance.tabId_}, 'Timeline.start');
-  }
-}
+  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Network.enable', null, function(){
+    g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Console.enable', null, function(){
+      g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Page.enable', null, function(){
+        g_instance.startedCallback();
+      });
+    });
+  });
+};
 
 /**
  * Process and send the data for a single request
@@ -220,6 +255,7 @@ wpt.chromeDebugger.OnAttachExperimental = function() {
  * @param {object} request Request data.
  */
 wpt.chromeDebugger.sendRequestDetails = function(request) {
+  var valid = false;
   var eventData = 'browser=chrome\n';
   eventData += 'url=' + request.url + '\n';
   if (request['errorCode'] !== undefined)
@@ -232,6 +268,8 @@ wpt.chromeDebugger.sendRequestDetails = function(request) {
     eventData += 'firstByteTime=' + request.firstByteTime + '\n';
   if (request['endTime'] !== undefined)
     eventData += 'endTime=' + request.endTime + '\n';
+  if (request['bytesIn'] !== undefined)
+    eventData += 'bytesIn=' + request.bytesIn + '\n';
   if (request['initiator'] !== undefined &&
       request.initiator['type'] !== undefined) {
     eventData += 'initiatorType=' + request.initiator.type + '\n';
@@ -259,6 +297,8 @@ wpt.chromeDebugger.sendRequestDetails = function(request) {
     if (request.response['connectionId'] !== undefined)
         eventData += 'connectionId=' + request.response.connectionId + '\n';
     if (request.response['timing'] !== undefined) {
+      if (request.response.timing['sendStart'] !== undefined && request.response.timing.sendStart > 0)
+        valid = true;
       eventData += 'timing.dnsStart=' + request.response.timing.dnsStart + '\n';
       eventData += 'timing.dnsEnd=' + request.response.timing.dnsEnd + '\n';
       eventData += 'timing.connectStart=' + request.response.timing.connectStart + '\n';
@@ -326,9 +366,14 @@ wpt.chromeDebugger.sendRequestDetails = function(request) {
     }
     eventData += '\n';
   }
-  wpt.chromeDebugger.sendEvent('request_data', eventData);
-}
+  if (valid)
+    wpt.chromeDebugger.sendEvent('request_data', eventData);
+};
 
+wpt.chromeDebugger.SendReceivedData = function() {
+  g_instance.receivedData = true;
+  wpt.chromeDebugger.sendEvent('received_data', '');
+};
 
 /**
  * Send an event to the c++ code
@@ -343,6 +388,6 @@ wpt.chromeDebugger.sendEvent = function(event, data) {
   } catch (err) {
     wpt.LOG.warning('Error sending request data XHR: ' + err);
   }
-}
+};
 
 })());  // namespace

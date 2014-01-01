@@ -65,25 +65,36 @@ SECURITY_STATUS SEC_ENTRY DecryptMessage_Hook(PCtxtHandle phContext,
   return ret;
 }
 
+BOOL __stdcall CertVerifyCertificateChainPolicy_Hook(
+    LPCSTR pszPolicyOID, PCCERT_CHAIN_CONTEXT pChainContext,
+    PCERT_CHAIN_POLICY_PARA pPolicyPara,
+    PCERT_CHAIN_POLICY_STATUS pPolicyStatus) {
+  BOOL ret = FALSE;
+  if (g_hook)
+    ret = g_hook->CertVerifyCertificateChainPolicy(pszPolicyOID, pChainContext,
+                                                   pPolicyPara, pPolicyStatus);
+  return ret;
+}
+
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 SchannelHook::SchannelHook(TrackSockets& sockets, TestState& test_state):
   _hook(NULL)
   ,_sockets(sockets)
   ,_test_state(test_state)
-  ,_InitializeSecurityContextW(NULL)
-  ,_InitializeSecurityContextA(NULL)
-  ,_DecryptMessage(NULL)
-  ,_EncryptMessage(NULL) {
+  ,InitializeSecurityContextW_(NULL)
+  ,InitializeSecurityContextA_(NULL)
+  ,DecryptMessage_(NULL)
+  ,EncryptMessage_(NULL)
+  ,CertVerifyCertificateChainPolicy_(NULL) {
 }
 
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 SchannelHook::~SchannelHook(void){
-  if (g_hook == this) {
+  if (g_hook == this)
     g_hook = NULL;
-  }
   delete _hook;  // remove all the hooks
 }
 
@@ -96,19 +107,22 @@ void SchannelHook::Init() {
   _hook = new NCodeHookIA32();
   g_hook = this;
   WptTrace(loglevel::kProcess, _T("[wpthook] SchannelHook::Init()\n"));
-  _InitializeSecurityContextW = _hook->createHookByName(
+  InitializeSecurityContextW_ = _hook->createHookByName(
       "secur32.dll", "InitializeSecurityContextW", 
       InitializeSecurityContextW_Hook);
-  _InitializeSecurityContextA = _hook->createHookByName(
+  InitializeSecurityContextA_ = _hook->createHookByName(
       "secur32.dll", "InitializeSecurityContextA", 
       InitializeSecurityContextA_Hook);
-  _DeleteSecurityContext = _hook->createHookByName(
+  DeleteSecurityContext_ = _hook->createHookByName(
       "secur32.dll", "DeleteSecurityContext", 
       DeleteSecurityContext_Hook);
-  _DecryptMessage = _hook->createHookByName(
+  DecryptMessage_ = _hook->createHookByName(
       "secur32.dll", "DecryptMessage", DecryptMessage_Hook);
-  _EncryptMessage = _hook->createHookByName(
+  EncryptMessage_ = _hook->createHookByName(
       "secur32.dll", "EncryptMessage", EncryptMessage_Hook);
+  CertVerifyCertificateChainPolicy_ = _hook->createHookByName(
+      "crypt32.dll", "CertVerifyCertificateChainPolicy",
+      CertVerifyCertificateChainPolicy_Hook);
 }
 
 /*-----------------------------------------------------------------------------
@@ -122,8 +136,8 @@ SECURITY_STATUS SchannelHook::InitializeSecurityContextW(
     PSecBufferDesc pOutput, unsigned long * pfContextAttr,
     PTimeStamp ptsExpiry) {
   SECURITY_STATUS ret = SEC_E_INTERNAL_ERROR;
-  if (_InitializeSecurityContextW) {
-    ret = _InitializeSecurityContextW(phCredential, phContext,
+  if (InitializeSecurityContextW_) {
+    ret = InitializeSecurityContextW_(phCredential, phContext,
             pszTargetName, fContextReq, Reserved1, TargetDataRep, pInput,
             Reserved2, phNewContext, pOutput, pfContextAttr, ptsExpiry);
     if (!phContext && phNewContext) {
@@ -144,8 +158,8 @@ SECURITY_STATUS SchannelHook::InitializeSecurityContextA(
     PSecBufferDesc pOutput, unsigned long * pfContextAttr,
     PTimeStamp ptsExpiry) {
   SECURITY_STATUS ret = SEC_E_INTERNAL_ERROR;
-  if (_InitializeSecurityContextA) {
-    ret = _InitializeSecurityContextA(phCredential, phContext,
+  if (InitializeSecurityContextA_) {
+    ret = InitializeSecurityContextA_(phCredential, phContext,
             pszTargetName, fContextReq, Reserved1, TargetDataRep, pInput,
             Reserved2, phNewContext, pOutput, pfContextAttr, ptsExpiry);
     if (!phContext && phNewContext) {
@@ -162,9 +176,8 @@ SECURITY_STATUS SchannelHook::DeleteSecurityContext(PCtxtHandle phContext) {
   if (phContext) {
     _sockets.ClearSslFd((PRFileDesc *)phContext);
   }
-  if (_DeleteSecurityContext) {
-    ret = _DeleteSecurityContext(phContext);
-  }
+  if (DeleteSecurityContext_)
+    ret = DeleteSecurityContext_(phContext);
   return ret;
 }
 
@@ -173,7 +186,7 @@ SECURITY_STATUS SchannelHook::DeleteSecurityContext(PCtxtHandle phContext) {
 SECURITY_STATUS SchannelHook::EncryptMessage(PCtxtHandle phContext, 
     unsigned long fQOP, PSecBufferDesc pMessage, unsigned long MessageSeqNo) {
   SECURITY_STATUS ret = SEC_E_INTERNAL_ERROR;
-  if (_EncryptMessage) {
+  if (EncryptMessage_) {
     SOCKET s = INVALID_SOCKET;
     _sockets.SslSocketLookup((PRFileDesc *)phContext, s);
     if (pMessage && !_test_state._exit) {
@@ -189,7 +202,7 @@ SECURITY_STATUS SchannelHook::EncryptMessage(PCtxtHandle phContext,
         }
       }
     }
-    ret = _EncryptMessage(phContext, fQOP, pMessage, MessageSeqNo);
+    ret = EncryptMessage_(phContext, fQOP, pMessage, MessageSeqNo);
   }
   return ret;
 }
@@ -199,9 +212,9 @@ SECURITY_STATUS SchannelHook::EncryptMessage(PCtxtHandle phContext,
 SECURITY_STATUS SchannelHook::DecryptMessage(PCtxtHandle phContext, 
     PSecBufferDesc pMessage,unsigned long MessageSeqNo,unsigned long * pfQOP) {
   SECURITY_STATUS ret = SEC_E_INTERNAL_ERROR;
-  if (_DecryptMessage) {
+  if (DecryptMessage_) {
     SOCKET s = INVALID_SOCKET;
-    ret = _DecryptMessage(phContext, pMessage, MessageSeqNo, pfQOP);
+    ret = DecryptMessage_(phContext, pMessage, MessageSeqNo, pfQOP);
     if (ret == SEC_E_OK && pMessage && !_test_state._exit) {
       if (_sockets.SslSocketLookup((PRFileDesc *)phContext, s) && 
             s != INVALID_SOCKET) {
@@ -217,5 +230,17 @@ SECURITY_STATUS SchannelHook::DecryptMessage(PCtxtHandle phContext,
       }
     }
   }
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+BOOL SchannelHook::CertVerifyCertificateChainPolicy(
+  LPCSTR pszPolicyOID, PCCERT_CHAIN_CONTEXT pChainContext,
+  PCERT_CHAIN_POLICY_PARA pPolicyPara,
+  PCERT_CHAIN_POLICY_STATUS pPolicyStatus) {
+  BOOL ret = TRUE;
+  if (pPolicyStatus)
+    pPolicyStatus->dwError = 0;
   return ret;
 }

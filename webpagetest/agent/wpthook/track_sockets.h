@@ -31,6 +31,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 class DataChunk;
 class Requests;
 class TestState;
+class WptTest;
 struct PRFileDesc;
 
 class SocketInfo {
@@ -40,7 +41,8 @@ public:
     , _accounted_for(false)
     , _during_test(false)
     , _is_ssl(false)
-    , _is_ssl_handshake_complete(false) {
+    , _is_ssl_handshake_complete(false)
+    , _local_port(0) {
     memset(&_addr, 0, sizeof(_addr));
     _connect_start.QuadPart = 0;
     _connect_end.QuadPart = 0;
@@ -53,6 +55,7 @@ public:
 
   DWORD               _id;
   struct sockaddr_in  _addr;
+  int                 _local_port;
   bool                _accounted_for;
   bool                _during_test;
   bool                _is_ssl;
@@ -65,7 +68,7 @@ public:
 
 class TrackSockets {
 public:
-  TrackSockets(Requests& requests, TestState& test_state);
+  TrackSockets(Requests& requests, TestState& test_state, WptTest& test);
   ~TrackSockets(void);
 
   void Create(SOCKET s);
@@ -92,6 +95,7 @@ public:
                     LARGE_INTEGER& start, LARGE_INTEGER& end,
                     LARGE_INTEGER& ssl_start, LARGE_INTEGER& ssl_end);
   ULONG GetPeerAddress(DWORD socket_id);
+  int GetLocalPort(DWORD socket_id);
   LONGLONG GetEarliest(LONGLONG& after);
   CStringA GetRTT(DWORD ipv4_address);
 
@@ -105,6 +109,7 @@ private:
   CRITICAL_SECTION cs;
   Requests&                   _requests;
   TestState&                  _test_state;
+  WptTest&                    _test;
   DWORD	_nextSocketId;	// ID to assign to the next socket
   CAtlMap<SOCKET, DWORD>	    _openSockets;
   CAtlMap<DWORD, SocketInfo*>  _socketInfo;

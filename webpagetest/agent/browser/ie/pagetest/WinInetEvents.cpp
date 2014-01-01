@@ -113,7 +113,7 @@ void CWinInetEvents::OnInternetCloseHandle(HINTERNET hInternet)
 	if( active )
 	{
 		__int64 now;
-		QueryPerformanceCounter((LARGE_INTEGER*)&now);
+		QueryPerfCounter(now);
 
 		CheckStuff();
 
@@ -227,7 +227,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 								r->hostName = (LPCSTR)lpvStatusInformation;
 								
 							if( !r->dnsStart )
-								QueryPerformanceCounter((LARGE_INTEGER*)&(r->dnsStart));
+								QueryPerfCounter(r->dnsStart);
 
 							if( !r->start )
 							{
@@ -245,7 +245,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 						{
 							ATLTRACE(_T("[Pagetest] - (0x%08X) *** 0x%p - INTERNET_STATUS_NAME_RESOLVED\n"), GetCurrentThreadId(), r->hRequest);
 							__int64 now;
-							QueryPerformanceCounter((LARGE_INTEGER*)&now);
+							QueryPerfCounter(now);
 
 							EnterCriticalSection(&cs);
 							if( r->dnsStart )
@@ -264,7 +264,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 							r->valid = true;
 							r->fromNet = true;
 							if( !r->socketConnect )
-								QueryPerformanceCounter((LARGE_INTEGER*)&(r->socketConnect));
+								QueryPerfCounter(r->socketConnect);
 
 							if( !r->start )
 							{
@@ -284,7 +284,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 				case INTERNET_STATUS_CONNECTED_TO_SERVER:
 						{
 							__int64 now;
-							QueryPerformanceCounter((LARGE_INTEGER*)&now);
+							QueryPerfCounter(now);
 
 							EnterCriticalSection(&cs);
 							if( r->socketConnect )
@@ -308,7 +308,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 							r->fromNet = true;
               OverrideHost(r);
 							if( !r->requestSent )
-								QueryPerformanceCounter((LARGE_INTEGER*)&(r->requestSent));
+								QueryPerfCounter(r->requestSent);
 								
 							// see if this is the base page that is being requested
 							if( !haveBasePage )
@@ -352,56 +352,60 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 								  r->host = buff;
               }
 							
-							// keep track of the request that is actively sending on this thread
-							EnterCriticalSection(&cs);
-							winInetThreadSends.SetAt(GetCurrentThreadId(), r);
-							LeaveCriticalSection(&cs);
-
-              // zero out the bytes on the linked socket if we have one and this is a secure request
-              // (to get rid of the actual ssl negotiation)
-              if( r->secure && r->linkedRequest )
-							{
-								((CSocketRequest *)r->linkedRequest)->in = 0;
-								((CSocketRequest *)r->linkedRequest)->out = 0;;
-							}
-							
-							ATLTRACE(_T("[Pagetest] - *** (0x%08X) 0x%p - INTERNET_STATUS_SENDING_REQUEST, socket %d\n"), GetCurrentThreadId(), r->hRequest, r->socketId);
+							ATLTRACE(_T("[Pagetest] - *** (%d) 0x%p - INTERNET_STATUS_SENDING_REQUEST, socket %d\n"), GetCurrentThreadId(), r->hRequest, r->socketId);
 						}
 						break;
 						
 				case INTERNET_STATUS_REQUEST_SENT:
 						{
+							ATLTRACE(_T("[Pagetest] - *** (%d) 0x%p - INTERNET_STATUS_REQUEST_SENT : %d bytes\n"), GetCurrentThreadId(), r->hRequest, r->out);
 							EnterCriticalSection(&cs);
 
 							if( dwStatusInformationLength == sizeof(DWORD) && lpvStatusInformation )
 								r->out += *((LPDWORD)lpvStatusInformation);
 							
-							// clean up the mapping of the request that was sending on this thread
+	            EnterCriticalSection(&cs);
+	            CSocketRequest * s = NULL;
+	            winInetThreadSends.Lookup(GetCurrentThreadId(), s);
+	            if( s )
+	            {
+		            r->linkedRequest = s;
+		            s->linkedRequest = r;
+            		
+		            // copy over the IP information
+		            r->peer.sin_addr.S_un.S_un_b.s_b1 = s->ipAddress[0];
+		            r->peer.sin_addr.S_un.S_un_b.s_b2 = s->ipAddress[1];
+		            r->peer.sin_addr.S_un.S_un_b.s_b3 = s->ipAddress[2];
+		            r->peer.sin_addr.S_un.S_un_b.s_b4 = s->ipAddress[3];
+		            r->peer.sin_port = s->port;
+		            r->socketId = s->socketId;
+
+                // zero out the bytes-in
+                s->in = 0;
+                r->in = 0;
+                ATLTRACE(_T("[Pagetest] INTERNET_STATUS_REQUEST_SENT - linked socket request to wininet request for %s%s\n"), (LPCTSTR)r->host, (LPCTSTR)r->object);
+              } else {
+                ATLTRACE(_T("[Pagetest] INTERNET_STATUS_REQUEST_SENT - Failed to link socket request to wininet request on thread %d\n"), GetCurrentThreadId());
+              }
+	            LeaveCriticalSection(&cs);
+
+              // clean up the mapping of the request that was sending on this thread
 							winInetThreadSends.RemoveKey(GetCurrentThreadId());
 
-              // zero out the bytes in on the linked socket if we have one and this is a secure request
-              // (to get rid of the actual ssl negotiation)
-              if( r->secure && r->linkedRequest )
-							{
-								((CSocketRequest *)r->linkedRequest)->in = 0;
-							}
-
 							LeaveCriticalSection(&cs);
-
-							ATLTRACE(_T("[Pagetest] - *** (0x%08X) 0x%p - INTERNET_STATUS_REQUEST_SENT : %d bytes\n"), GetCurrentThreadId(), r->hRequest, r->out);
 						}
 						break;
 						
 				case INTERNET_STATUS_RECEIVING_RESPONSE:
 						{
-							ATLTRACE(_T("[Pagetest] - *** (0x%08X) 0x%p - INTERNET_STATUS_RECEIVING_RESPONSE\n"), GetCurrentThreadId(), r->hRequest);
+							ATLTRACE(_T("[Pagetest] - *** (%d) 0x%p - INTERNET_STATUS_RECEIVING_RESPONSE\n"), GetCurrentThreadId(), r->hRequest);
 						}
 						break;
 						
 				case INTERNET_STATUS_REDIRECT:
 						{
 							CString url = CA2T((LPCSTR)lpvStatusInformation);
-							ATLTRACE(_T("[Pagetest] - *** (0x%08X) 0x%p - INTERNET_STATUS_REDIRECT : Redirecting to %s\n"), GetCurrentThreadId(), r->hRequest, (LPCTSTR)url);
+							ATLTRACE(_T("[Pagetest] - *** (%d) 0x%p - INTERNET_STATUS_REDIRECT : Redirecting to %s\n"), GetCurrentThreadId(), r->hRequest, (LPCTSTR)url);
 							
 							// get the headers, close out the request and start a new one for the redirect
 							r->Done();
@@ -503,10 +507,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 							  winInetRequests.SetAt(req->hRequest, req);
 							  winInetRequestList.AddHead(req);
                 OverrideHost(req);
-  							
-							  // keep track of the request that is actively sending on this thread
-							  winInetThreadSends.SetAt(GetCurrentThreadId(), req);
-							  LeaveCriticalSection(&cs);
+ 							  LeaveCriticalSection(&cs);
   							
 							  AddEvent(req);
               }
@@ -623,9 +624,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 								CSocketInfo * soc = NULL;
 								openSockets.Lookup(r->s, soc);
 								if( soc )
-								{
 									memcpy( &r->peer, &soc->address, sizeof(SOCKADDR_IN) );
-								}
 							}
 							LeaveCriticalSection(&cs);
 						}
@@ -634,7 +633,7 @@ void CWinInetEvents::OnInternetStatusCallback(HINTERNET hInternet, DWORD_PTR dwC
 
 			// update the activity time
 			if( !r->ignore )
-				QueryPerformanceCounter((LARGE_INTEGER *)&lastActivity);
+				QueryPerfCounter(lastActivity);
 		}
 
 		CheckStuff();
@@ -741,7 +740,7 @@ void * CWinInetEvents::BeforeHttpOpenRequest(HINTERNET hConnect, CString &verb, 
 
 				// update the activity time
 				if( !r->ignore )
-					QueryPerformanceCounter((LARGE_INTEGER *)&lastActivity);
+					QueryPerfCounter(lastActivity);
 			}
 			LeaveCriticalSection(&cs);
 		}
@@ -820,7 +819,7 @@ void CWinInetEvents::AfterHttpOpenRequest(HINTERNET hRequest, void * context)
 			
 			// update the activity time
 			if( active && !r->ignore )
-				QueryPerformanceCounter((LARGE_INTEGER *)&lastActivity);
+				QueryPerfCounter(lastActivity);
 		}
 	}__except(1)
 	{
@@ -905,7 +904,7 @@ void CWinInetEvents::OnHttpSendRequest(HINTERNET hRequest, CString &headers, LPV
     POSITION pos = headersAdd.GetHeadPosition();
     while(pos)
     {
-      CAddHeader header = headersAdd.GetNext(pos);
+      CFilteredHeader header = headersAdd.GetNext(pos);
       CString h = header.header;
       if( h.GetLength() && RegexMatch(r->host, header.filter) )
       {
@@ -918,8 +917,9 @@ void CWinInetEvents::OnHttpSendRequest(HINTERNET hRequest, CString &headers, LPV
     pos = headersSet.GetHeadPosition();
     while(pos)
     {
-      CString h = headersSet.GetNext(pos);
-      if( h.GetLength() )
+      CFilteredHeader header = headersSet.GetNext(pos);
+      CString h = header.header;
+      if( h.GetLength() && RegexMatch(r->host, header.filter) )
       {
         h = h + _T("\r\n");
         HttpAddRequestHeaders( hRequest, h, h.GetLength(), HTTP_ADDREQ_FLAG_ADD | HTTP_ADDREQ_FLAG_REPLACE );
@@ -962,7 +962,7 @@ void CWinInetEvents::OnHttpSendRequest(HINTERNET hRequest, CString &headers, LPV
 		}
 		
 		if( r && !r->ignore )
-			QueryPerformanceCounter((LARGE_INTEGER *)&lastActivity);
+			QueryPerfCounter(lastActivity);
 	}
 
 	ATLTRACE(_T("[Pagetest] - *** (0x%08X) 0x%p - OnHttpSendRequest - complete\n"), GetCurrentThreadId(), hRequest);
@@ -1021,27 +1021,11 @@ void CWinInetEvents::linkSocketRequestConnect(CSocketConnect * c)
 -----------------------------------------------------------------------------*/
 void CWinInetEvents::linkSocketRequestSend(CSocketRequest * r)
 {
+  // keep track of the request that is actively sending on this thread
 	EnterCriticalSection(&cs);
-	CWinInetRequest * w = NULL;
-	winInetThreadSends.Lookup(GetCurrentThreadId(), w);
-	if( w )
-	{
-		w->linkedRequest = r;
-		r->linkedRequest = w;
-		
-		// copy over the IP information
-		w->peer.sin_addr.S_un.S_un_b.s_b1 = r->ipAddress[0];
-		w->peer.sin_addr.S_un.S_un_b.s_b2 = r->ipAddress[1];
-		w->peer.sin_addr.S_un.S_un_b.s_b3 = r->ipAddress[2];
-		w->peer.sin_addr.S_un.S_un_b.s_b4 = r->ipAddress[3];
-		w->peer.sin_port = r->port;
-		w->socketId = r->socketId;
-
-    // zero out the bytes-in
-    r->in = 0;
-    w->in = 0;
-	}
+	winInetThreadSends.SetAt(GetCurrentThreadId(), r);
 	LeaveCriticalSection(&cs);
+  ATLTRACE(_T("[Pagetest] CWinInetEvents::linkSocketRequestSend - stored request mapping on thread %d\n"), GetCurrentThreadId());
 }
 
 /*-----------------------------------------------------------------------------

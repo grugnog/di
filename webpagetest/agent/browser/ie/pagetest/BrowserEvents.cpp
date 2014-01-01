@@ -108,7 +108,7 @@ void CBrowserEvents::BeforeNavigate(CString & szUrl)
 			currentDoc = nextDoc;
 			nextDoc++;
 
-			QueryPerformanceCounter((LARGE_INTEGER *)&lastRequest);
+			QueryPerfCounter(lastRequest);
 			lastActivity = lastRequest;
 		}
 
@@ -181,10 +181,11 @@ void CBrowserEvents::DocumentComplete(CString & szUrl, DWORD code)
 			errorCode = code;
 
     // update the end time
-		QueryPerformanceCounter((LARGE_INTEGER *)&lastActivity);
+		QueryPerfCounter(lastActivity);
     end = lastActivity;
 		endDoc = end;
 		lastDoc = lastActivity;
+		GetCPUTime(docCPU, docCPUtotal);
 
 		// throw away any objects that happen outside of a document load
 		currentDoc = 0;
@@ -244,8 +245,7 @@ void CBrowserEvents::DocumentComplete(CString & szUrl, DWORD code)
 						CString script = testUrl.Right(testUrl.GetLength() - 9);
 						LoadScript(script);
 					}
-					OutputDebugString(_T("[Pagetest] - Browser loaded\n"));
-					StartTimer(2, 2500);
+					StartTimer(2, 100);
 				}
 			}
 
@@ -273,7 +273,7 @@ void CBrowserEvents::StatusUpdate(CString status)
 	if( active )
 	{
 		__int64 now;
-		QueryPerformanceCounter((LARGE_INTEGER *)&now);
+		QueryPerfCounter(now);
 		CStatusUpdate stat(status, now);
 
 		EnterCriticalSection(&cs);
@@ -296,16 +296,12 @@ void CBrowserEvents::TitleChange(CString title)
 	if( active )
 	{
 		__int64 now;
-		QueryPerformanceCounter((LARGE_INTEGER *)&now);
+		QueryPerfCounter(now);
 
 		EnterCriticalSection(&cs);
     if( !titleTime )
-    {
-      OutputDebugString(_T("First title change\n"));
       titleTime = now;
-    }
     title.Replace(_T('\t'), _T(' '));
-    OutputDebugString(title);
     pageTitle = title;
 		LeaveCriticalSection(&cs);
 	}
@@ -315,7 +311,7 @@ void CBrowserEvents::TitleChange(CString title)
 -----------------------------------------------------------------------------*/
 void CBrowserEvents::JSDone(void)
 {
-	QueryPerformanceCounter((LARGE_INTEGER *)&lastRequest);
+	QueryPerfCounter(lastRequest);
   if( end )
     end = lastRequest;
 

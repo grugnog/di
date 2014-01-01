@@ -3,131 +3,222 @@ include './settings.inc';
 
 $results = array();
 
-$loc = array();
-$loc['EC2_East_wptdriver:Chrome.DSL'] = 'Chrome';
-$loc['EC2_East_wptdriver:Firefox.DSL'] = 'Firefox';
-$loc['EC2_East.DSL'] = 'IE 9';
-
-$metrics = array('ttfb', 'startRender', 'docComplete', 'fullyLoaded', 'speedIndex', 'bytes', 'requests');
-
 // Load the existing results
 if (LoadResults($results)) {
     // split them up by URL and location
     $data = array();
     $stats = array();
+    $invalid = 0;
+    $total = 0;
+    $minRuns = ceil($runs / 2);
     foreach($results as &$result) {
-        $url = $result['url'];
-        $location = $loc[$result['location']];
-        if( !array_key_exists($url, $data) ) {
-            $data[$url] = array();
+        $valid = true;
+        $validVisual = true;
+        $total++;
+        if ((@$result['result'] != 0 && @$result['result'] != 99999 ) ||
+            !@$result['bytesInDoc'] ||
+            !@$result['docTime'] ||
+            !@$result['TTFB'] ||
+            $result['successfulRuns'] < $minRuns ||
+            @$result['TTFB'] > @$result['docTime'] ||
+            (isset($maxBandwidth) && $maxBandwidth && (($result['bytesInDoc'] * 8) / $result['docTime']) > $maxBandwidth) ||
+            ($video && (!$result['SpeedIndex'] || !$result['render'] || !$result['visualComplete']))) {
+            $valid = false;
+            $invalid++;
         }
-        $data[$url][$location] = array();
-        $data[$url][$location]['id'] = $result['id'];
-        $data[$url][$location]['result'] = $result['result'];
-        if( $result['result'] == 0 || $result['result'] == 99999 ) {
-            if (!array_key_exists($location, $stats)) {
-                $stats[$location] = array();
-                foreach ($metrics as $metric) {
-                    $stats[$location][$metric] = array();
-                }
+        if ($valid && $video && (!$result['SpeedIndex'] || !$result['render'] || !$result['visualComplete'])) {
+          $validVisual = false;
+        }
+        $url = $result['url'];
+        $label = $result['label'];
+        $index = 1;
+        $key = $url;
+        while (array_key_exists($key, $data) && array_key_exists($label, $data[$key])) {
+          $index++;
+          $key = "$url ($index)";
+        }
+        if( !array_key_exists($key, $data) )
+            $data[$key] = array();
+        $data[$key]['url'] = $url;
+        $data[$key][$label] = array();
+        $data[$key][$label]['id'] = $result['id'];
+        $data[$key][$label]['result'] = $result['result'];
+        if (array_key_exists('run', $result))
+          $data[$key][$label]['run'] = $result['run'];
+        $data[$key][$label]['valid'] = $valid;
+        $data[$key][$label]['validVisual'] = $validVisual;
+        if( $valid ) {
+            if (!array_key_exists($label, $stats)) {
+                $stats[$label] = array();
+                foreach ($metrics as $metric)
+                    $stats[$label][$metric] = array();
             }
             foreach ($metrics as $metric) {
-                $data[$url][$location][$metric] = $result[$metric];
-                $stats[$location][$metric][] = $result[$metric];
+              if (array_key_exists($metric, $result) && IsMetricValid($metric, $valid, $validVisual)) {
+                $data[$key][$label][$metric] = $result[$metric];
+                if (array_key_exists("$metric.stddev", $result))
+                  $data[$key][$label]["$metric.stddev"] = $result["$metric.stddev"];
+                $stats[$label][$metric][] = $result[$metric];
+              }
             }
         }
     }
+    echo "$invalid of $total\n";
     ksort($data);
+    $file = fopen("./tests.csv", 'w');
+    if ($file) {
+      fwrite($file, 'URL');
+      foreach($permutations as $label => &$permutation)
+          fwrite($file, ",$label");
+      fwrite($file, "\r\n");
+      foreach($data as $key => &$urlData) {
+        fwrite($file, "\"{$urlData['url']}\"");
+        foreach($permutations as $label => &$permutation) {
+          $test = '';
+          if (array_key_exists($label, $urlData) &&
+              is_array($urlData[$label]) &&
+              array_key_exists('id', $urlData[$label]))
+              $test = "{$server}result/{$urlData[$label]['id']}/";
+          fwrite($file, ",\"$test\"");
+        }
+        fwrite($file, "\r\n");
+      }
+      fclose($file);
+    }
     foreach ($metrics as $metric) {
         $file = fopen("./$metric.csv", 'w+');
         if ($file) {
-            fwrite($file, "URL,Chrome 23,Firefox 16,Firefox 16 Delta,IE 9,IE 9 Delta,Test Comparison\r\n");
-            $metricData = array('Chrome' => array(), 'Firefox' => array(), 'IE' => array());
-            $firefoxFaster = 0;
-            $ieFaster = 0;
-            foreach($data as $url => &$urlData) {
-                fwrite($file, "$url,");
-                $chrome = null;
-                if (array_key_exists('Chrome', $urlData) && array_key_exists($metric, $urlData['Chrome'])) {
-                    $chrome = $urlData['Chrome'][$metric];
-                    fwrite($file, $chrome);
+            fwrite($file, 'URL,');
+            $metricData = array();
+            $first = true;
+            foreach($permutations as $label => &$permutation) {
+                fwrite($file, "$label,");
+                fwrite($file, "$label stddev,");
+                if (!$first)
+                    fwrite($file, "$label Delta,");
+                $metricData[$label] = array();
+                $first = false;
+            }
+            fwrite($file, "Test Comparison\r\n");
+            foreach($data as $key => &$urlData) {
+                fwrite($file, "\"{$urlData['url']}\",");
+                // check and make sure we have data for all of the configurations for this url
+                $valid = true;
+                foreach($permutations as $label => &$permutation) {
+                    if (!array_key_exists($label, $urlData) || !array_key_exists($metric, $urlData[$label]))
+                        $valid = false;
                 }
-                fwrite($file, ',');
-                $firefox = null;
-                if (array_key_exists('Firefox', $urlData) && array_key_exists($metric, $urlData['Firefox'])) {
-                    $firefox = $urlData['Firefox'][$metric];
-                    fwrite($file, $firefox);
+                $compare = "\"http://www.webpagetest.org/video/compare.php?ival=100&end=full&tests=";
+                $first = true;
+                $baseline = null;
+                foreach($permutations as $label => &$permutation) {
+                    $value = '';
+                    if ($valid && array_key_exists($label, $urlData) && array_key_exists($metric, $urlData[$label]))
+                        $value = $urlData[$label][$metric];
+                    fwrite($file, "$value,");
+                    $stddev = '';
+                    if ($valid && array_key_exists($label, $urlData) && array_key_exists("$metric.stddev", $urlData[$label]))
+                        $stddev = $urlData[$label]["$metric.stddev"];
+                    fwrite($file, "$stddev,");
+                    if ($first)
+                        $baseline = $value;
+                    else {
+                        $delta = '';
+                        if ($valid && strlen($value) && strlen($baseline))
+                            $delta = $value - $baseline;
+                        fwrite($file, "$delta,");
+                    }
+                    if (strlen($value))
+                        $metricData[$label][] = $value;
+                    if (array_key_exists($label, $urlData) && array_key_exists('id', $urlData[$label])) {
+                      $run = '';
+                      if (array_key_exists('run', $urlData[$label]))
+                        $run = "-r:{$urlData[$label]['run']}";
+                      $compare .= $urlData[$label]['id'] . $run . '-l:' . urlencode($label) . ',';
+                    }
+                    $first = false;
                 }
-                fwrite($file, ',');
-                if (isset($chrome) && isset($firefox)) {
-                    $delta = $firefox - $chrome;
-                    fwrite($file, $delta);
-                }
-                fwrite($file, ',');
-                $ie = null;
-                if (array_key_exists('IE 9', $urlData) && array_key_exists($metric, $urlData['IE 9'])) {
-                    $ie = $urlData['IE 9'][$metric];
-                    fwrite($file, $ie);
-                }
-                fwrite($file, ',');
-                if (isset($chrome) && isset($ie)) {
-                    $delta = $ie - $chrome;
-                    fwrite($file, $delta);
-                }
-                fwrite($file, ',');
-                $compare = "\"http://www.webpagetest.org/video/compare.php?thumbSize=200&ival=100&end=doc&tests=";
-                $compare .= $urlData['Chrome']['id'] . '-l:Chrome%2023,';
-                $compare .= $urlData['Firefox']['id'] . '-l:Firefox%2016,';
-                $compare .= $urlData['IE 9']['id'] . '-l:IE%209';
-                $compare .= '"';
+                $compare .= "\"\r\n";
                 fwrite($file, $compare);
-                fwrite($file, "\r\n");
-                if (isset($chrome) && isset($firefox) && isset($ie)) {
-                    $metricData['Chrome'][] = $chrome;
-                    $metricData['Firefox'][] = $firefox;
-                    $metricData['IE'][] = $ie;
-                    if ($firefox < $chrome) {
-                        $firefoxFaster++;
-                    }
-                    if ($ie < $chrome) {
-                        $ieFaster++;
-                    }
-                }
             }
             fclose($file);
             $summary = fopen("./{$metric}_Summary.csv", 'w+');
             if ($summary) {
-                sort($metricData['Chrome']);
-                sort($metricData['Firefox']);
-                sort($metricData['IE']);
-                fwrite($summary, ",Chrome 23,Firefox 16,Firefox 16 delta,IE 9,IE 9 delta\r\n");
-                $chrome = Avg($metricData['Chrome']);
-                $firefox = Avg($metricData['Firefox']);
-                $firefoxDelta = $firefox - $chrome;
-                $firefoxDeltaPct = round(($firefoxDelta / $chrome) * 100);
-                $ie = Avg($metricData['IE']);
-                $ieDelta = $ie - $chrome;
-                $ieDeltaPct = number_format(($ieDelta / $chrome) * 100, 2);
-                fwrite($summary, "Average,$chrome,$firefox,$firefoxDelta ($firefoxDeltaPct%),$ie,$ieDelta ($ieDeltaPct%)\r\n");
-                $percentiles = array(25,50,75,95,99);
-                foreach($percentiles as $percentile) {
-                    $chrome = Percentile($metricData['Chrome'], $percentile);
-                    $firefox = Percentile($metricData['Firefox'], $percentile);
-                    $firefoxDelta = $firefox - $chrome;
-                    $firefoxDeltaPct = number_format(($firefoxDelta / $chrome) * 100, 2);
-                    $ie = Percentile($metricData['IE'], $percentile);
-                    $ieDelta = $ie - $chrome;
-                    $ieDeltaPct = number_format(($ieDelta / $chrome) * 100, 2);
-                    fwrite($summary, "{$percentile}th Percentile,$chrome,$firefox,$firefoxDelta ($firefoxDeltaPct%),$ie,$ieDelta ($ieDeltaPct%)\r\n");
+                fwrite($summary, ',');
+                $first = true;
+                foreach($permutations as $label => &$permutation) {
+                    sort($metricData[$label]);
+                    fwrite($summary, "$label,");
+                    if (!$first)
+                        fwrite($summary, "$label Delta,");
+                    $first = false;
                 }
                 fwrite($summary, "\r\n");
-                fwrite($summary, "Test Count," . count($metricData['Chrome']) . "\r\n");
-                fwrite($summary, "Firefox Faster,$firefoxFaster\r\n");
-                fwrite($summary, "IE Faster,$ieFaster\r\n");
+                fwrite($summary, 'Average,');
+                $first = true;
+                $baseline = null;
+                $testCount = 0;
+                foreach($permutations as $label => &$permutation) {
+                    $value = '';
+                    if (array_key_exists($label, $metricData))
+                        $value = Avg($metricData[$label]);
+                    fwrite($summary, "$value,");
+                    if ($first) {
+                        $testCount = count($metricData[$label]);
+                        $baseline = $value;
+                    } else {
+                        $delta = '';
+                        if (strlen($value) && strlen($baseline)) {
+                            $delta = $value - $baseline;
+                            if ($baseline) {
+                                $deltaPct = number_format(($delta / $baseline) * 100, 2);
+                                $delta .= " ($deltaPct%)";
+                            }
+                        }
+                        fwrite($summary, "$delta,");
+                    }
+                    $first = false;
+                }
+                fwrite($summary, "\r\n");
+                $percentiles = array(25,50,75,95,99);
+                foreach($percentiles as $percentile) {
+                    fwrite($summary, "{$percentile}th Percentile,");
+                    $first = true;
+                    $baseline = null;
+                    foreach($permutations as $label => &$permutation) {
+                        $value = '';
+                        if (array_key_exists($label, $metricData))
+                            $value = Percentile($metricData[$label], $percentile);
+                        fwrite($summary, "$value,");
+                        if ($first)
+                            $baseline = $value;
+                        else {
+                            $delta = '';
+                            if (strlen($value) && strlen($baseline)) {
+                                $delta = $value - $baseline;
+                                if ($baseline) {
+                                    $deltaPct = number_format(($delta / $baseline) * 100, 2);
+                                    $delta .= " ($deltaPct%)";
+                                }
+                            }
+                            fwrite($summary, "$delta,");
+                        }
+                        $first = false;
+                    }
+                    fwrite($summary, "\r\n");
+                }
+                fwrite($summary, "\r\n");
+                fwrite($summary, "Test Count,$testCount\r\n");
                 fclose($summary);
             }
         }
     }
+}
+
+function IsMetricValid($metric, $valid, $validVisual) {
+  if ($valid && !$validVisual && ($metric == 'SpeedIndex' || $metric == 'render' || $metric == 'visualComplete'))
+    $valid = false;
+  return $valid;
 }
 
 function Avg(&$data) {
@@ -151,47 +242,6 @@ function Percentile(&$data, $percentile) {
         $val = $data[$pos];
     }
     return $val;
-}
-
-/**
-* Dump the data of a particular type to a tab-delimited report
-* 
-* @param mixed $data
-* @param mixed $type
-*/
-function ReportData(&$data, $type)
-{
-    global $locations;
-    $file = fopen("./report_$type.txt", 'wb');
-    if($file)
-    {
-        fwrite($file, "URL\t");
-        foreach($locations as $location)
-            fwrite($file, "$location $type avg\t");
-        foreach($locations as $location)
-            fwrite($file, "$location $type stddev\t");
-        foreach($locations as $location)
-            fwrite($file, "$location $type stddev/avg\t");
-        fwrite($file, "\r\n");
-        foreach($data as $urlhash => &$urlentry)
-        {
-            fwrite($file, "{$urlentry['url']}\t");
-            foreach($locations as $location){
-                $value = $urlentry['data'][$location]["{$type}_avg"];
-                fwrite($file, "$value\t");
-            }
-            foreach($locations as $location){
-                $value = $urlentry['data'][$location]["{$type}_stddev"];
-                fwrite($file, "$value\t");
-            }
-            foreach($locations as $location){
-                $value = $urlentry['data'][$location]["{$type}_ratio"];
-                fwrite($file, "$value\t");
-            }
-            fwrite($file, "\r\n");
-        }
-        fclose($file);
-    }
 }
 
 /**

@@ -37,23 +37,25 @@ public:
   bool TestDone(WptTestDriver& test);
 
   bool _exit;
+  bool has_gpu_;
 
 private:
   WptSettings&  _settings;
   WptStatus&    _status;
   DWORD         _version;
   CString       _computer_name;
+  CString       _dns_servers;
 
   bool HttpGet(CString url, WptTestDriver& test, CString& test_string, 
-                CString& zip_file);
+               CString& zip_file);
   bool ParseTest(CString& test_string, WptTestDriver& test);
   bool CrackUrl(CString url, CString &host, unsigned short &port, 
-                    CString& object);
+                CString& object, DWORD &secure_flag);
   bool BuildFormData(WptSettings& settings, WptTestDriver& test, 
-                            bool done,
-                            CString file_name, DWORD file_size,
-                            CString& headers, CStringA& footer, 
-                            CStringA& form_data, DWORD& content_length);
+                     bool done,
+                     CString file_name, DWORD file_size,
+                     CString& headers, CStringA& footer, 
+                     CStringA& form_data, DWORD& content_length);
   bool UploadFile(CString url, bool done, WptTestDriver& test, CString file);
   bool CompressResults(CString directory, CString zip_file);
   void GetImageFiles(const CString& directory, CAtlList<CString>& files);
@@ -63,4 +65,7 @@ private:
   bool UploadData(WptTestDriver& test, bool done);
   bool ProcessZipFile(CString zip_file, WptTestDriver& test);
   bool InstallUpdate(CString dir);
+  bool GetClient(WptTestDriver& test);
+  bool UnzipTo(CString zip_file, CString dest);
+  void UpdateDNSServers();
 };

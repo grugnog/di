@@ -54,7 +54,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <sstream>
 using namespace std::tr1;
-#include "AFT.h"
 #include "../urlblast/zip/zip.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -65,17 +64,12 @@ static const DWORD BOTTOM_MARGIN = 25;
 
 CPagetestReporting::CPagetestReporting(void):
 	reportSt(NONE)
-	, experimental(0)
 	, includeHeader(0)
-	, labID(-1)
-	, dialerID(-1)
-	, connectionType(-1)
 	, build(0)
 	, guid(_T(""))
 	, includeObjectData(1)
 	, saveEverything(0)
 	, captureVideo(0)
-	, screenShotErrors(0)
 	, checkOpt(1)
   , noHeaders(0)
   , noImages(0)
@@ -173,7 +167,6 @@ void CPagetestReporting::Reset(void)
 		tmStartRender = 0;
 		tmDOMElement = 0;
 		tmBasePage = 0;
-    msAFT = 0;
     msVisualComplete = 0;
 		reportSt = NONE;
 		
@@ -276,10 +269,9 @@ void CPagetestReporting::FlushResults(void)
 	StopTimers();
 
 	EnterCriticalSection(&cs);
-	if( active || capturingAFT )
+	if( active )
 	{
 		active = false;
-    capturingAFT = false;
 		LeaveCriticalSection(&cs);
 		
 		// make sure we got at least one document complete, otherwise we really have no data
@@ -312,7 +304,7 @@ void CPagetestReporting::FlushResults(void)
 					ATLTRACE(_T("[Pagetest] - ***** CPagetestReporting::FlushResults - Generating Lab Report\n"));
 
 					DWORD msDoc = endDoc < start ? 0 : (DWORD)((endDoc - start)/msFreq);
-					DWORD msDone = lastRequest < start ? 0 : (DWORD)((lastRequest - start)/msFreq);
+					DWORD msDone = lastActivity < start ? 0 : (DWORD)((lastActivity - start)/msFreq);
           msDone = max(msDoc, msDone);
 					DWORD msRender = (DWORD)(tmStartRender * 1000.0);
 					DWORD msDom = (DWORD)(tmDOMElement * 1000.0);
@@ -404,9 +396,6 @@ void CPagetestReporting::FlushResults(void)
             SaveBodies(logFile+step+_T("_bodies.zip"));
             SaveCustomMatches(logFile+step+_T("_custom_rules.json"));
 
-            if( aft )
-              msAFT = CalculateAFT();
-
             if( captureVideo )
             {
               ATLTRACE(_T("[Pagetest] - ***** CPagetestReporting::FlushResults - Saving video\n"));
@@ -439,6 +428,14 @@ void CPagetestReporting::FlushResults(void)
 							  CloseHandle(hFile);
 						  }
             }
+
+            // write out the dev tools timeline information          
+            LARGE_INTEGER start_time;
+            start_time.QuadPart = start;
+            dev_tools_.SetStartTime(start_time);
+					  dev_tools_.Write(logFile+step+_T("_devtools.json"));
+
+					  SaveUserTiming(logFile+step+_T("_timed_events.json"));
           }
 
           // delete the image data
@@ -534,8 +531,6 @@ void CPagetestReporting::ProcessResults(void)
 	firstByte = 0;
 	pageIP.sin_addr.S_un.S_addr = 0;
 	
-	OutputDebugString(_T("[Pagetest] - Processing Results\n"));
-	
 	// if it was just a single js file or something similar, treat it as successful
 	if( errorCode == 200 )
 		errorCode = 0;
@@ -598,7 +593,7 @@ void CPagetestReporting::ProcessResults(void)
 		if( event )
 		{
 			if( !event->end )
-				event->end = max(lastRequest, end);
+				event->end = max(lastActivity, end);
 
 			if( event->end > event->start )
 				event->elapsed = event->end < event->start ? 0 : ((double)(event->end - event->start)) / (double)freq;
@@ -746,7 +741,7 @@ void CPagetestReporting::ProcessResults(void)
 		start = earliest;
 
 	// Calculate summary results
-	tmLastActivity = lastRequest < start ? 0 : ((double)(lastRequest - start)) / (double)freq;
+	tmLastActivity = lastActivity < start ? 0 : ((double)(lastActivity - start)) / (double)freq;
 	tmFirstByte = firstByte < start ? 0 : ((double)(firstByte - start)) / (double)freq;
 	tmStartRender = startRender < start ? 0 : ((double)(startRender - start)) / (double)freq;
 	tmDOMElement = domElement < start ? 0 : ((double)(domElement - start)) / (double)freq;
@@ -782,10 +777,10 @@ void CPagetestReporting::ProcessResults(void)
 	if( measurementType == 1 )
 		end = endDoc;
 	else
-		end = lastRequest;
+		end = lastActivity;
 
 	tmDoc = endDoc < start ? 0 : ((double)(endDoc - start)) / (double)freq;
-	tmActivity = lastRequest < start ? 0 : ((double)(lastRequest - start)) / (double)freq;
+	tmActivity = lastActivity < start ? 0 : ((double)(lastActivity - start)) / (double)freq;
   tmLoad = tmActivity = max(tmActivity, tmDoc);
   tmLastActivity = tmActivity;
 
@@ -937,7 +932,7 @@ void CPagetestReporting::ReportPageData(CString & buff, bool fIncludeHeader)
 	// page-level calculations
 	DWORD msLoadDoc = endDoc < start ? 0 : (DWORD)((endDoc - start)/msFreq);
 	DWORD msLoad = msLoadDoc;
-	DWORD msActivity = lastRequest < start ? 0 : (DWORD)((lastRequest - start)/msFreq);
+	DWORD msActivity = lastActivity < start ? 0 : (DWORD)((lastActivity - start)/msFreq);
   msActivity = max(msActivity, msLoad);
 	DWORD msTTFB = firstByte < start ? 0 : (DWORD)((firstByte - start)/msFreq);
 	DWORD msStartRender = (DWORD)(tmStartRender * 1000.0);
@@ -958,6 +953,10 @@ void CPagetestReporting::ReportPageData(CString & buff, bool fIncludeHeader)
         domElements = CountDOMElements(doc);
     }
   }
+  
+  // get the navigation timing information from supported browsers
+  long load_start, load_end, dcl_start, dcl_end, first_paint;
+  GetNavTiming(load_start, load_end, dcl_start, dcl_end, first_paint);
 
 	CA2T ip(inet_ntoa(pageIP.sin_addr));
 	
@@ -1014,11 +1013,18 @@ void CPagetestReporting::ReportPageData(CString & buff, bool fIncludeHeader)
 				_T("Time to Base Page Complete (ms)\tBase Page Result\tGzip Total Bytes\tGzip Savings\tMinify Total Bytes\tMinify Savings\t")
         _T("Image Total Bytes\tImage Savings\tBase Page Redirects\tOptimization Checked\tAFT (ms)\tDOM Elements\tPage Speed Version\t")
 				_T("Page Title\tTime to Title\tLoad Event Start\tLoad Event End\tDOM Content Ready Start\tDOM Content Ready End\tVisually Complete (ms)\t")
-        _T("Browser Name\tBrowser Version\tBase Page Server Count\tBase Page Server RTT\tBase Page CDN\tAdult Site\r\n");
+        _T("Browser Name\tBrowser Version\tBase Page Server Count\tBase Page Server RTT\tBase Page CDN\tAdult Site\tFixed Viewport\tProgressive JPEG Score\t")
+        _T("First Paint\tPeak Memory\tProcess Count\tDOC CPU Time\tCPU Time\tDoc CPU Utilization\tCPU Utilization\r\n");
 	}
 	else
 		buff.Empty();
 
+  int docUtilization = GetCPUUtilization(startCPU, docCPU, startCPUtotal, docCPUtotal);
+  int fullUtilization = GetCPUUtilization(startCPU, endCPU, startCPUtotal, endCPUtotal);
+	if( key.Open(HKEY_CURRENT_USER, _T("Software\\AOL\\ieWatch"), KEY_WRITE) == ERROR_SUCCESS ) {
+		key.SetDWORDValue(_T("cpu"), docUtilization);
+		key.Close();
+	}
 	TCHAR result[10000];
 	_stprintf_s(result, _countof(result), _T("%s\t%s\t%s\t%s\t")
 										_T("%d\t%d\t%d\t%d\t%d\t%d\t%d\t")
@@ -1030,23 +1036,27 @@ void CPagetestReporting::ReportPageData(CString & buff, bool fIncludeHeader)
 										_T("%d\t%d\t%d\t%d\t")
 										_T("%d\t%d\t%d\t%d\t%d\t%d\t")
 										_T("%d\t%s\t%s\t%d\t%d\t%d\t%d\t")
-										_T("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t")
-                    _T("%d\t%d\t%s\t%s\t%d\t0\t0\t0\t0\t%d\t")
-                    _T("%s\t%s\t%d\t%s\t%s\t%d")
+										_T("%d\t%d\t%d\t%d\t%d\t%d\t")
+										_T("%d\t%d\t%d\t%d\t%d\t%d\t%s\t")
+                    _T("%s\t%d\t%d\t%d\t%d\t%d\t%d\t")
+                    _T("%s\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t")
+                    _T("%d\t%d\t%d\t%0.3f\t%0.3f\t%d\t%d")
 										_T("\r\n"),
 			(LPCTSTR)szDate, (LPCTSTR)szTime, (LPCTSTR)somEventName, (LPCTSTR)pageUrl,
 			msLoad, msTTFB, 0, out, in, nDns, nConnect, 
 			nRequest, nReq200, nReq302, nReq304, nReq404, nReqOther, 
 			errorCode, msStartRender, tcpStats.dwOutSegs, tcpStats.dwRetransSegs, tcpRetrans,
-			msActivity, descriptor, labID, dialerID, connectionType, cached, logUrl, build,
-			measurementType, experimental, msLoadDoc, (LPCTSTR)guid, msDomElement, includeObjectData_Now ? 1 : 0, 
+			msActivity, descriptor, -1, -1, 0, cached, logUrl, build,
+			measurementType, 0, msLoadDoc, (LPCTSTR)guid, msDomElement, includeObjectData_Now ? 1 : 0, 
 			cacheScore, staticCdnScore, oneCdnScore, gzipScore, cookieScore, keepAliveScore, doctypeScore, minifyScore, combineScore,
 			out_doc, in_doc, nDns_doc, nConnect_doc, 
-			nRequest_doc, nReq200_doc, nReq302_doc, nReq304_doc, nReq404_doc, nReqOther_doc,
-			compressionScore, host, (LPCTSTR)ip, etagScore, flaggedRequests, totalFlagged, maxSimFlagged,
-			msBasePage, basePageResult, gzipTotal, gzipTotal - gzipTarget, minifyTotal, minifyTotal - minifyTarget, compressTotal, compressTotal - compressTarget, basePageRedirects, checkOpt,
-      msAFT, domElements, (LPCTSTR)pageSpeedVersion, (LPCTSTR)pageTitle, msTitle, msVisualComplete,
-      _T("Internet Explorer"), browserVersion, basePageAddressCount, basePageRTT, basePageCDN, adultSite);
+			nRequest_doc, nReq200_doc, nReq302_doc, nReq304_doc, nReq404_doc, nReqOther_doc, compressionScore,
+			host, (LPCTSTR)ip, etagScore, flaggedRequests, totalFlagged, maxSimFlagged,
+			msBasePage, basePageResult, gzipTotal, gzipTotal - gzipTarget, minifyTotal, minifyTotal - minifyTarget,
+			compressTotal, compressTotal - compressTarget, basePageRedirects, checkOpt, 0, domElements, (LPCTSTR)pageSpeedVersion,
+			(LPCTSTR)pageTitle, msTitle, load_start, load_end, dcl_start, dcl_end, msVisualComplete,
+      _T("Internet Explorer"), browserVersion, basePageAddressCount, basePageRTT, basePageCDN, adultSite, -1, progressiveJpegScore,
+      first_paint, 0, 0, GetElapsedMilliseconds(startCPU, docCPU), GetElapsedMilliseconds(startCPU, endCPU), docUtilization, fullUtilization);
 	buff += result;
 }
 
@@ -1062,7 +1072,7 @@ void CPagetestReporting::ReportObjectData(CString & buff, bool fIncludeHeader)
 		// page-level calculations (included as the first row in the object data)
 		DWORD msLoadDoc = endDoc < start ? 0 : (DWORD)((endDoc - start)/msFreq);
 		DWORD msLoad = msLoadDoc;
-		DWORD msActivity = lastRequest < start ? 0 : (DWORD)((lastRequest - start)/msFreq);
+		DWORD msActivity = lastActivity < start ? 0 : (DWORD)((lastActivity - start)/msFreq);
     msActivity = max(msActivity, msLoad);
 		DWORD msTTFB = firstByte < start ? 0 : (DWORD)((firstByte - start)/msFreq);
 		DWORD msStartRender = (DWORD)(tmStartRender * 1000.0);
@@ -1092,39 +1102,12 @@ void CPagetestReporting::ReportObjectData(CString & buff, bool fIncludeHeader)
 					_T("Secure\tDNS Time\tConnect Time\tSSL Time\tGzip Total Bytes\tGzip Savings\tMinify Total Bytes\tMinify Savings\tImage Total Bytes\tImage Savings\tCache Time (sec)")
 					_T("\tReal Start Time (ms)\tFull Time to Load (ms)\tOptimization Checked\tCDN Provider")
           _T("\tDNS Start\tDNS End\tConnect Start\tConnect End\tSSL Start\tSSL End\tInitiator\tInitiator Line\tInitiator Column")
-          _T("\tServer Count\tServer RTT")
+          _T("\tServer Count\tServer RTT\tClient Port")
 					_T("\r\n");
 		}
 		else
 			buff.Empty();
 			
-		// page-level data
-		result.Format(	_T("%s\t%s\t%s\t")
-						_T("%s\t%s\t%s\t%s\t")
-						_T("%d\t%d\t%d\t%d\t%d\t%d\t")
-						_T("%d\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t")
-						_T("%s\t%d\t%d\t%d\t%d\t%s\t%d\t")
-						_T("%d\t%d\t%s\t%d\t")
-						_T("%d\t%d\t%d\t%d\t%d\t")
-						_T("%d\t%d\t%d\t%d\t%d\t%d\t")
-						_T("%d\t%s\t%s\t%s")
-						_T("\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%s")
-            _T("\t\t\t\t\t\t\t\t\t")
-            _T("\t\t%s")
-						_T("\r\n"),
-				(LPCTSTR)szDate, (LPCTSTR)szTime, (LPCTSTR)somEventName, 
-				(LPCTSTR)ip, _T(""), _T(""), (LPCTSTR)pageUrl,
-				errorCode, msLoad, msTTFB, msStartRender, out, in,
-				0, 0, 0, _T(""), _T(""), _T(""), _T(""), CTrackedEvent::etPage, 0, 0, msLoadDoc,
-				descriptor, labID, dialerID, connectionType, cached, logUrl, build,
-				measurementType, experimental, (LPCTSTR)guid, sequence++,
-				cacheScore, staticCdnScore, gzipScore, cookieScore, keepAliveScore, 
-				doctypeScore, minifyScore, combineScore, compressionScore, etagScore, flaggedRequests,
-				0, _T(""), _T(""), _T(""),
-				gzipTotal, gzipTotal - gzipTarget, minifyTotal, minifyTotal - minifyTarget, 
-        compressTotal, compressTotal - compressTarget, _T(""), checkOpt, _T(""), (LPCTSTR)GetRTT(pageIP.sin_addr.S_un.S_addr) );
-		buff += result;
-
 		// loop through all of the requests on the page
 		POSITION pos = events.GetHeadPosition();
 		while( pos )
@@ -1177,6 +1160,9 @@ void CPagetestReporting::ReportObjectData(CString & buff, bool fIncludeHeader)
 					if( !w->fromNet )
 						reqType = CTrackedEvent::etCachedRequest;
 					
+					int localPort = 0;
+					client_ports.Lookup(w->socketId, localPort);
+					
 					result.Format(	_T("%s\t%s\t%s\t%s\t")
 									_T("%s\t%s\t%s\t")
 									_T("%d\t%d\t%d\t%d\t%d\t%d\t")
@@ -1192,7 +1178,7 @@ void CPagetestReporting::ReportObjectData(CString & buff, bool fIncludeHeader)
 									_T("\t%d\t%d\t%d\t%d\t%d\t%d\t%s")
 									_T("\t%d\t%d\t%d\t%s")
                   _T("\t\t\t\t\t\t\t\t\t")
-                  _T("\t%d\t%s")
+                  _T("\t%d\t%s\t%d\t%d")
 									_T("\r\n"),
 							(LPCTSTR)szDate, (LPCTSTR)szTime, (LPCTSTR)somEventName, (LPTSTR)ip, 
 							(LPCTSTR)w->verb, (LPCTSTR)w->host, (LPCTSTR)w->object,
@@ -1201,13 +1187,13 @@ void CPagetestReporting::ReportObjectData(CString & buff, bool fIncludeHeader)
 							(LPCTSTR)w->response.expires, (LPCTSTR)w->response.cacheControl,
 							(LPCTSTR)w->response.contentType, (LPCTSTR)w->response.contentEncoding, 
 							reqType, w->socketId, w->docID, msEndOffset,
-							descriptor, labID, dialerID, connectionType, cached, logUrl, build,
-							measurementType, experimental, (LPCTSTR)guid, sequence++,
+							descriptor, -1, -1, 0, cached, logUrl, build,
+							measurementType, 0, (LPCTSTR)guid, sequence++,
 							w->cacheScore, w->staticCdnScore, w->gzipScore, w->cookieScore, w->keepAliveScore, 
 							w->doctypeScore, w->minifyScore, w->combineScore, w->compressionScore, w->etagScore, w->flagged?1:0,
 							w->secure, (LPCTSTR)tmDns, (LPCTSTR)tmSocket, (LPCTSTR)tmSSL,
 							w->gzipTotal, w->gzipTotal - w->gzipTarget, w->minifyTotal, w->minifyTotal - w->minifyTarget, w->compressTotal, w->compressTotal - w->compressTarget, (LPCTSTR)ttl,
-              msRealOffset, msFullLoad, checkOpt, (LPCTSTR)w->cdnProvider, GetAddressCount(w->host), (LPCTSTR)GetRTT(w->peer.sin_addr.S_un.S_addr) );
+              msRealOffset, msFullLoad, checkOpt, (LPCTSTR)w->cdnProvider, GetAddressCount(w->host), (LPCTSTR)GetRTT(w->peer.sin_addr.S_un.S_addr), localPort, w->jpegScans );
 					buff += result;
 				}
 			}
@@ -1377,15 +1363,16 @@ void CPagetestReporting::GenerateReport(CString &szReport)
 -----------------------------------------------------------------------------*/
 void CPagetestReporting::SaveBodies(CString file)
 {
-  if (bodies)
+  if (bodies || htmlbody)
   {
 	  zipFile zip = zipOpen(CT2A(file), APPEND_STATUS_CREATE);
 	  if( zip )
 	  {
+	    bool done = false;
 	    DWORD count = 0;
       DWORD bodiesCount = 0;
 	    POSITION pos = events.GetHeadPosition();
-	    while( pos )
+	    while( pos && !done )
 	    {
 		    CTrackedEvent * event = events.GetNext(pos);
 		    if( event && event->type == CTrackedEvent::etWinInetRequest )
@@ -1408,6 +1395,8 @@ void CPagetestReporting::SaveBodies(CString file)
                 zipWriteInFileInZip( zip, r->body, r->bodyLen );
 							  zipCloseFileInZip( zip );
                 bodiesCount++;
+                if (htmlbody)
+                  done = true;
 						  }
             }
           }
@@ -1534,13 +1523,10 @@ void CPagetestReporting::CheckOptimization(void)
 {
 	if( checkOpt )
 	{
-		// spawn some background threads to do the DNS lookups for the CDN checks so we
-		// can have those going on while we do the CPU-intensive checks
-		StartCDNLookups();
-
 		CheckKeepAlive();
 		CheckGzip();
 		CheckImageCompression();
+		CheckProgressiveJpeg();
 		CheckCache();
 		CheckCombine();
 		CheckMinify();
@@ -1698,11 +1684,6 @@ void CPagetestReporting::PopulatePageSpeedInput(pagespeed::PagespeedInput* input
 						static_cast<LPSTR>(CT2CA(value)));
 				}
 			}
-
-      // fake a gzip header for secure resources so page speed doesn't ding them
-      // wininet removes this header so we can't see it
-      if (w->secure)
-					resource->AddResponseHeader("Content-Encoding", "gzip");
 
 			// Next, merge the cached response headers from wininet.
 			//
@@ -1870,8 +1851,7 @@ void CPagetestReporting::CheckGzip()
 			mime.MakeLower();
 			if( w->result == 200
 				&& w->linkedRequest
-				&& w->fromNet
-				&& !w->secure )
+				&& w->fromNet )
 			{
 				CString enc = w->response.contentEncoding;
 				enc.MakeLower();
@@ -1881,39 +1861,62 @@ void CPagetestReporting::CheckGzip()
 				if( enc.Find(_T("gzip")) >= 0 || enc.Find(_T("deflate")) >= 0 )
 					w->gzipScore = 100;
 				else if( w->in < 1400 )	// if it's less than 1 packet anyway, give it a pass
-					w->gzipScore = 100;
+					w->gzipScore = -1;
 
 				if( !w->gzipScore )
 				{
 					LPBYTE body = w->body;
 					DWORD bodyLen = w->bodyLen;
-					
-					// try gzipping the item to see how much smaller it will be
-					DWORD origSize = w->in;
-					DWORD origLen = bodyLen;
-					DWORD headSize = w->inHeaders.GetLength();
-					if( origLen && body )
-					{
-						DWORD len = compressBound(origLen);
-						if( len )
-						{
-							LPBYTE buff = (LPBYTE)malloc(len);
-							if( buff )
-							{
-								if( compress2(buff, &len, body, origLen, 7) == Z_OK )
-									target = len + headSize;
-								
-								free(buff);
-							}
-						}
-						
-						if( target < (origSize * 0.9) && origSize - target > 1400 )
-							w->warning = true;
-						else
-						{
-							target = origSize;
-							w->gzipScore = -1;
-						}
+
+          // don't try gzip for known image formats that shouldn't be gzipped
+          if ((bodyLen > 3 &&             // JPEG FF D8 FF
+               body[0] == 0xFF &&
+               body[1] == 0xD8 &&
+               body[2] == 0xFF) ||
+              (bodyLen > 8 &&             // PNG 89 50 4E 47 0D 0A 1A 0A
+               body[0] == 0x89 &&
+               body[1] == 0x50 &&
+               body[2] == 0x4E &&
+               body[3] == 0x47 &&
+               body[4] == 0x0D &&
+               body[5] == 0x0A &&
+               body[6] == 0x1A &&
+               body[7] == 0x0A) ||
+              (bodyLen > 6 &&             // Gif 47 49 46 38 37(9) 61
+               body[0] == 0x47 &&
+               body[1] == 0x49 &&
+               body[2] == 0x46 &&
+               body[3] == 0x38 &&
+               body[5] == 0x61)) {
+            w->gzipScore = -1;
+          } else {
+					  // try gzipping the item to see how much smaller it will be
+					  DWORD origSize = w->in;
+					  DWORD origLen = bodyLen;
+					  DWORD headSize = w->inHeaders.GetLength();
+					  if( origLen && body )
+					  {
+						  DWORD len = compressBound(origLen);
+						  if( len )
+						  {
+							  LPBYTE buff = (LPBYTE)malloc(len);
+							  if( buff )
+							  {
+								  if( compress2(buff, &len, body, origLen, 7) == Z_OK )
+									  target = len + headSize;
+  								
+								  free(buff);
+							  }
+						  }
+  						
+						  if( target < (origSize * 0.9) && origSize - target > 1400 )
+							  w->warning = true;
+						  else
+						  {
+							  target = origSize;
+							  w->gzipScore = -1;
+						  }
+					  }
 					}
 				}
 
@@ -1963,7 +1966,8 @@ void CPagetestReporting::CheckKeepAlive()
 
 				CString conn = w->response.connection;
 				conn.MakeLower();
-				if( conn.Find(_T("keep-alive")) > -1 )
+				if( conn.Find(_T("keep-alive")) > -1 &&
+            conn.Find(_T("close")) == -1)
 					w->keepAliveScore = 100;
 				else
 				{
@@ -2031,19 +2035,6 @@ void CPagetestReporting::CheckCDN()
 	int total = 0;
 	ATLTRACE(_T("[Pagetest] - CheckCDN\n"));
 
-	// wait for the parallel lookup threads to complete
-	count = hCDNThreads.GetCount();
-	if( count )
-	{
-		WaitForMultipleObjects(count, hCDNThreads.GetData(), TRUE, INFINITE);
-		for( DWORD i = 0; i < count; i++ )
-			if( hCDNThreads[i] )
-				CloseHandle(hCDNThreads[i]);
-
-		hCDNThreads.RemoveAll();
-	}
-	
-	// do the actual evaluation (all the host names should be looked up by now)
 	count = 0;
 	POSITION pos = events.GetHeadPosition();
 	while( pos )
@@ -2086,8 +2077,7 @@ void CPagetestReporting::CheckCDN()
 			CString host = w->host;
 			host.MakeLower();
 
-			if( IsCDN(w, w->cdnProvider) && isStatic )
-			{
+			if (IsCDN(w, w->cdnProvider) && isStatic) {
 			  w->staticCdnScore = 100;
 			}
 
@@ -2686,9 +2676,10 @@ bool CPagetestReporting::IsCDN(CWinInetRequest * w, CString &provider)
   provider.Empty();
 	if( !host.IsEmpty() )
 	{
-		// make sure we haven't already identified it
+		// See if the host name or any CNAMEs were known CDN's
+    // these would have been added directly at the time of
+    // the DNS lookup
 		bool found = false;
-
 		EnterCriticalSection(&csCDN);
 		POSITION pos = cdnLookups.GetHeadPosition();
 		while( pos && !found )
@@ -2703,9 +2694,8 @@ bool CPagetestReporting::IsCDN(CWinInetRequest * w, CString &provider)
 		}
 		LeaveCriticalSection(&csCDN);
 		
-		if( !found )
-		{
-      // now check http headers for known CDNs (cheap check)
+		if( !found ) {
+      // now check http headers for known CDNs
       int cdn_header_count = _countof(cdnHeaderList);
       for (int i = 0; i < cdn_header_count && !found; i++) {
         CDN_PROVIDER_HEADER * cdn_header = &cdnHeaderList[i];
@@ -2713,78 +2703,14 @@ bool CPagetestReporting::IsCDN(CWinInetRequest * w, CString &provider)
         header.MakeLower();
         CString pattern = CA2T(cdn_header->pattern);
         pattern.MakeLower();
-        if (pattern.GetLength() && header.GetLength() && 
-          header.Find(pattern) >= 0) {
+        if (header.GetLength() &&
+            (!pattern.GetLength() ||
+             header.Find(pattern) >= 0)) {
             found = true;
             ret = true;
             provider = cdn_header->name;
         }
       }
-      if (!found) {
-			  // look it up and look at the cname entries for the host
-			  hostent * dnsinfo = gethostbyname(CT2A(host));
-			  if( dnsinfo && !WSAGetLastError() )
-			  {
-				  // check all of the aliases
-				  CAtlList<CStringA> names;
-				  names.AddTail((LPCSTR)CT2A(host));
-				  names.AddTail(dnsinfo->h_name);
-				  char ** alias = dnsinfo->h_aliases;
-				  while( *alias )
-				  {
-					  names.AddTail(*alias);
-					  alias++;
-				  }
-
-				  // also try a reverse-lookup on the IP
-				  if( w->peer.sin_addr.S_un.S_addr )
-				  {
-					  //DWORD addr = htonl(server.sin_addr.S_un.S_addr);
-					  DWORD addr = w->peer.sin_addr.S_un.S_addr;
-					  dnsinfo = gethostbyaddr((char *)&addr, sizeof(addr), AF_INET);
-					  if( dnsinfo && !WSAGetLastError() )
-					  {
-						  if( dnsinfo->h_name )
-							  names.AddTail(dnsinfo->h_name);
-
-						  alias = dnsinfo->h_aliases;
-						  while( *alias )
-						  {
-							  names.AddTail(*alias);
-							  alias++;
-						  }
-					  }
-				  }
-
-				  POSITION pos = names.GetHeadPosition();
-				  while( pos && !ret )
-				  {				
-					  CStringA name = names.GetNext(pos);
-					  name.MakeLower();
-
-					  CDN_PROVIDER * cdn = cdnList;
-					  while( !ret && cdn->pattern)
-					  {
-						  if( name.Find(cdn->pattern) > -1 )
-						  {
-							  ret = true;
-							  provider = cdn->name;
-						  }
-
-						  cdn++;
-					  }
-				  }
-			  }
-      }
-			
-			// add it to the list of resolved names
-			EnterCriticalSection(&csCDN);
-			CCDNEntry entry;
-			entry.name = host;
-			entry.isCDN = ret;
-			entry.provider = provider;
-			cdnLookups.AddHead(entry);
-			LeaveCriticalSection(&csCDN);
 		}
 	}
 
@@ -3369,124 +3295,6 @@ void CPagetestReporting::SortEvents()
 	}
 }
 
-unsigned __stdcall cdnLookupThread( void* arg )
-{
-	if( reporting )
-		((CPagetestReporting*)reporting)->cdnLookupThread((DWORD)arg);
-		
-	return 0;
-}
-
-/*-----------------------------------------------------------------------------
-	Kick off some background threads for the different host names to do 
-	all of the DNS lookups in parallel
------------------------------------------------------------------------------*/
-void CPagetestReporting::StartCDNLookups(void)
-{
-	// build a list of host names we care about
-	cdnRequests.RemoveAll();
-
-	POSITION pos = events.GetHeadPosition();
-	while( pos )
-	{
-		CTrackedEvent * e = events.GetNext(pos);
-		if( e && e->type == CTrackedEvent::etWinInetRequest && !e->ignore )
-		{
-			CWinInetRequest * w = (CWinInetRequest *)e;
-			bool found = false;
-			for( DWORD i = 0; i < cdnRequests.GetCount() && !found; i++ )
-				if( !w->host.CompareNoCase(cdnRequests[i]->host) )
-					found = true;
-
-			if( !found )
-				cdnRequests.Add(w);
-		}
-	}
-
-	// spawn threads to do each of the lookups
-	DWORD count = cdnRequests.GetCount();
-	if( count )
-	{
-		hCDNThreads.RemoveAll();
-		reporting = this;
-		for( DWORD i = 0; i < count; i++ )
-		{
-			unsigned int addr = 0;
-			HANDLE hThread = (HANDLE)_beginthreadex( 0, 0, ::cdnLookupThread, (void *)i, 0, &addr);
-			if( hThread )
-				hCDNThreads.Add(hThread);
-		}
-	}
-}
-
-/*-----------------------------------------------------------------------------
-	Thread doing the actual CDN lookups
------------------------------------------------------------------------------*/
-void CPagetestReporting::cdnLookupThread(DWORD index)
-{
-	// do a single lookup for the entry that is our responsibility
-	if( index < cdnRequests.GetCount() )
-	{
-		// we don't care about the result right now, it will get cached for later
-		CString provider;
-		IsCDN(cdnRequests[index], provider);
-	}
-}
-
-/*-----------------------------------------------------------------------------
-	Calculate the AFT
------------------------------------------------------------------------------*/
-DWORD CPagetestReporting::CalculateAFT()
-{
-  DWORD msAFT = 0;
-  ATLTRACE(_T("[Pagetest] - ***** CPagetestReporting::FlushResults - Calculating AFT\n"));
-  CAFT aftEngine(aftMinChanges, aftEarlyCutoff);
-  aftEngine.SetCrop(0, 12, 12, 0);
-
-  screenCapture.Lock();
-  CxImage * last_image = NULL;
-  CString file_name;
-  POSITION pos = screenCapture._captured_images.GetHeadPosition();
-  while (pos) 
-  {
-    CapturedImage& image = screenCapture._captured_images.GetNext(pos);
-    DWORD image_time = 0;
-    if (image._capture_time.QuadPart > start)
-      image_time = (DWORD)((image._capture_time.QuadPart - start) / msFreq);
-    CxImage * img = new CxImage;
-    if (image.Get(*img)) 
-    {
-      img->Resample2(img->GetWidth() / 2, img->GetHeight() / 2);
-      if (last_image) 
-      {
-        if (ImagesAreDifferent(last_image, img)) 
-        {
-          aftEngine.AddImage( img, image_time );
-        }
-      } 
-      else 
-        aftEngine.AddImage( img, image_time );
-
-      if (last_image)
-        delete last_image;
-      last_image = img;
-    }
-    else
-      delete img;
-  }
-
-  bool confidence;
-  CxImage imgAft;
-  aftEngine.Calculate(msAFT, confidence, &imgAft);
-  imgAft.Save(logFile + _T("_aft.png"), CXIMAGE_FORMAT_PNG);
-
-  if (last_image)
-    delete last_image;
-  screenCapture.Unlock();
-
-  return msAFT;
-}
-
 /*-----------------------------------------------------------------------------
 	Save out the video
 -----------------------------------------------------------------------------*/
@@ -3713,4 +3521,194 @@ CStringA CPagetestReporting::JSONEscape(CStringA src) {
   src.Replace("\t", "\\t");
   src.Replace("\f", "\\f");
   return src;
+}
+
+/*-----------------------------------------------------------------------------
+	? If the object is a JPEG, see if it is progressive (and count the scans)
+-----------------------------------------------------------------------------*/
+void CPagetestReporting::CheckProgressiveJpeg()
+{
+	progressiveJpegScore = -1;
+  double progressive_bytes = 0;
+  double total_bytes = 0;
+
+	ATLTRACE(_T("[Pagetest] - CheckProgressiveJpeg\n"));
+	
+	POSITION pos = events.GetHeadPosition();
+	while( pos ) {
+		CTrackedEvent * e = events.GetNext(pos);
+		if( e && e->type == CTrackedEvent::etWinInetRequest && !e->ignore ) {
+			CWinInetRequest * w = (CWinInetRequest *)e;
+			CString mime = w->response.contentType;
+			mime.MakeLower();
+			
+			LPBYTE body = w->body;
+			DWORD bodyLen = w->bodyLen;
+			
+			if( w->fromNet && 
+				w->result == 200 && 
+				mime.Find(_T("image/")) >= 0 && 
+				body && bodyLen > 2 &&
+				body[0] == 0xff && body[1] == 0xd8) {
+        w->jpegScans = 0;
+        DWORD pos = 0;
+        BYTE * marker;
+        DWORD marker_length;
+        while (FindJPEGMarker(body, bodyLen, pos, marker, marker_length) &&
+               marker) {
+          if (marker[0] == 0xff && marker[1] == 0xda)
+            w->jpegScans++;
+          pos += marker_length;
+        }
+        
+        if (bodyLen > 10240 && w->jpegScans > 0) {
+          total_bytes += bodyLen;
+          if (w->jpegScans > 1)
+            progressive_bytes += bodyLen;
+        }
+			}
+		}
+	}
+
+  if (total_bytes > 0)
+    progressiveJpegScore = (int)((progressive_bytes * 100.0 / total_bytes) + 0.5);
+}
+
+/*-----------------------------------------------------------------------------
+  Given a JPEG byte stream, find the next marker
+-----------------------------------------------------------------------------*/
+bool CPagetestReporting::FindJPEGMarker(BYTE * buff, DWORD len, DWORD &pos,
+                                        BYTE * &marker, DWORD &marker_len) {
+  bool found = false;
+  marker = NULL;
+  marker_len = 0;
+  BYTE sos = 0xda;
+  if (pos < len) {
+    BYTE val = buff[pos];
+    if (val == 0xff) {
+      // ff can repeat, the actual marker comes from the first non-ff
+      while (val == 0xff && pos < len) {
+        pos++;
+        val = buff[pos];
+      }
+      marker = &buff[pos - 1];
+      pos++;
+      if ((val >= 0xd0 && val <= 0xd9) || val == 0x01) {
+        found = true;
+      } else if(val == sos) {
+        // image data
+        DWORD marker_end = pos + 1;
+        DWORD next_marker = len;
+        while (marker_end < len - 1 && !found) {
+          val = buff[marker_end];
+          if (val == 0xff) {
+            DWORD i = marker_end + 1;
+            val = buff[i];
+            if (val != 0x00) {   // escaping
+              while (i < len - 1 && val == 0xff) {
+                i++;
+                val = buff[i];
+              }
+              next_marker = marker_end;
+              found = true;
+            }
+          }
+          marker_end++;
+        }
+        marker_len = next_marker - pos;
+      } else if (pos + 1 < len) {
+        BYTE v1 = buff[pos];
+        BYTE v2 = buff[pos + 1];
+        marker_len = (DWORD)v1 * 256 + (DWORD)v2;
+        found = true;
+      }
+    }
+  }
+  return found;
+}
+
+/*-----------------------------------------------------------------------------
+  Run some in-page javascript to get the navigation timing data from
+  supported browsers (IE 9+).
+-----------------------------------------------------------------------------*/
+void CPagetestReporting::GetNavTiming(long &load_start, long &load_end,
+                                      long &dcl_start, long &dcl_end,
+                                      long &first_paint) {
+  load_start = load_end = dcl_start = dcl_end = first_paint = 0;
+  static const TCHAR * FN_GET_NAV_TIMING =
+      _T("var wptGetNavTimings = (function(){")
+      _T("  var timingParams = \"\";")
+      _T("  if (window.performance && window.performance.timing) {")
+      _T("    function addTime(name) {")
+      _T("      return Math.max(0, (performance.timing[name] - ")
+      _T("              performance.timing['navigationStart']));")
+      _T("    };")
+      _T("    timingParams = addTime('domContentLoadedEventStart') + ',' +")
+      _T("        addTime('domContentLoadedEventEnd') + ',' +")
+      _T("        addTime('msFirstPaint') + ',' +")
+      _T("        addTime('loadEventStart') + ',' +")
+      _T("        addTime('loadEventEnd');")
+      _T("  }")
+      _T("  return timingParams;")
+      _T("});");
+  LPOLESTR GET_NAV_TIMINGS = L"wptGetNavTimings";
+  if (ExecuteScript(FN_GET_NAV_TIMING)) {
+    _variant_t timings;
+    if (InvokeScript(GET_NAV_TIMINGS, timings)) {
+      if (timings.vt == VT_BSTR) {
+        CString nav_timings(timings);
+        int pos = 0;
+        int index = 0;
+        CString val = nav_timings.Tokenize(_T(","), pos);
+        while (pos != -1) {
+          index++;
+          long int_val = _ttol(val);
+          if (int_val > 0 && int_val < 3600000) {
+            switch (index) {
+              case 1: dcl_start = int_val; break;
+              case 2: dcl_end = int_val; break;
+              case 3: first_paint = int_val; break;
+              case 4: load_start = int_val; break;
+              case 5: load_end = int_val; break;
+            }
+          }
+          val = nav_timings.Tokenize(_T(","), pos);
+        }
+      }
+    }
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Run some in-page javascript to get the user timing data if it exists
+-----------------------------------------------------------------------------*/
+void CPagetestReporting::SaveUserTiming(CString file) {
+  static const TCHAR * FN_GET_USER_TIMING =
+    _T("var wptGetUserTimings = (function(){")
+    _T("  var ret = '';")
+    _T("  if (window.performance && window.performance.getEntriesByType) {")
+    _T("    var marks = JSON.stringify(performance.getEntriesByType('mark'));")
+    _T("    if (marks.length > 2)")
+    _T("      ret = marks.replace(/\"name\":/g,'\"type\":\"mark\",\"name\":');")
+    _T("  }")
+    _T("  return ret;")
+    _T("});");
+  LPOLESTR GET_USER_TIMINGS = L"wptGetUserTimings";
+  if (ExecuteScript(FN_GET_USER_TIMING)) {
+    _variant_t timings;
+    if (InvokeScript(GET_USER_TIMINGS, timings)) {
+      if (timings.vt == VT_BSTR) {
+        CString user_timings(timings);
+        if (user_timings.GetLength()) {
+				  HANDLE hFile = CreateFile(file, GENERIC_WRITE, 0, &nullDacl, CREATE_ALWAYS, 0, 0);
+				  if( hFile != INVALID_HANDLE_VALUE ) {
+					  DWORD written;
+					  CT2A str((LPCTSTR)user_timings, CP_UTF8);
+					  WriteFile(hFile, (LPCSTR)str, lstrlenA(str), &written, 0);
+					  CloseHandle(hFile);
+				  }
+        }
+      }
+    }
+  }
 }

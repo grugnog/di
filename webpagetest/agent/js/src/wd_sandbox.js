@@ -25,11 +25,10 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
-/*jslint nomen:false */
 
 var vm = require('vm');
 var logger = require('logger');
-var webdriver = require('webdriver');
+var webdriver = require('selenium-webdriver');
 
 /**
  * createSandboxedWebDriverModule creates a sandboxed webdriver Object
@@ -71,11 +70,11 @@ exports.createSandboxedWebDriverModule = function() {
           wdSourceWithExports, wdModuleSandbox, 'sandboxed webdriver module');
       var wdNamespaceSandboxed = {};
       wdModuleSandboxed.call(wdNamespaceSandboxed, wdNamespaceSandboxed);
-      result.resolve(wdNamespaceSandboxed);
+      result.fulfill(wdNamespaceSandboxed);
     });
   } else {
     // Running in a browser, cannot re-read the module, and no need as well.
-    result.resolve(webdriver);
+    result.fulfill(webdriver);
   }
 
   return result.promise;
@@ -94,19 +93,19 @@ function SandboxedDriver(driver, wdSandbox, sandboxedDriverListener) {
 
   var realSchedule = driver.schedule;
   driver.schedule = function(command, description) {
-    logger.extra('User script: %s', description);
+    logger.extra('(user script) %s', description);
     var commandArgs = arguments;
-    wdSandbox.promise.Application.getInstance().schedule(
+    wdSandbox.promise.controlFlow().schedule(
         'onBeforeDriverAction: ' + description, function() {
       sandboxedDriverListener.onBeforeDriverAction(
-          driver, command, commandArgs);
+          command, commandArgs);
     });
     return realSchedule.apply(driver, arguments).then(function(result) {
-      sandboxedDriverListener.onAfterDriverAction(
-          driver, command, commandArgs, result);
+      sandboxedDriverListener.onAfterDriverAction(command, commandArgs, result);
       return result;  // Don't mess with the result.
     }, function(e) {
-      sandboxedDriverListener.onAfterDriverError(driver, command, arguments, e);
+      sandboxedDriverListener.onAfterDriverError(command, arguments, e);
+      throw e;
     });
   };
 
@@ -124,7 +123,7 @@ function SandboxedDriver(driver, wdSandbox, sandboxedDriverListener) {
  * createSandboxedWdNamespace builds the sandboxed module then adds a
  * protected builder to it
  *
- * @param {String} serverUrl the url of the webdriver server.
+ * @param {string} serverUrl the url of the webdriver server.
  * @param {Object} capabilities sandbox information such as browser, version
  *                 and platform.
  * @param {Object} sandboxedDriverListener an object with three methods:
@@ -141,13 +140,18 @@ exports.createSandboxedWdNamespace = function(
     serverUrl, capabilities, sandboxedDriverListener) {
   'use strict';
   return exports.createSandboxedWebDriverModule().then(function(wdSandbox) {
-    var isDriverBuilt = false;
+    var builder = new wdSandbox.Builder()
+        .usingServer(serverUrl)
+        .withCapabilities(capabilities);
+    var builtDriver = null;
+    var sandboxedDriver = null;
 
     /**
      * A proxy for restricting access to Builder operations.
      * NOTE: the WebDriver instances returned by #build could
      * also be proxied to restrict access to internal state while
      * I work on refactoring the code.
+     *
      * @constructor
      */
     function ProtectedBuilder() {
@@ -155,9 +159,6 @@ exports.createSandboxedWdNamespace = function(
       // leak our promise system into theirs. They'd play well
       // together, but you'd end up with weird synchronization
       // issues.  Avoiding those is the whole point of all this!
-      var builder = new wdSandbox.Builder()
-          .usingServer(serverUrl)
-          .withCapabilities(capabilities);
       var methodName;
       for (methodName in builder) {
         if (typeof builder[methodName] === 'function') {
@@ -165,15 +166,18 @@ exports.createSandboxedWdNamespace = function(
         }
       }
 
-      this.build = function() {
-        if (isDriverBuilt) {
-          throw new Error('You may only create one driver');
+      // The driver is a singleton -- user scripts cannot call quit(),
+      // and we call quit() ourselves only at the end of last run.
+      this.build = (function() {
+        if (!builtDriver) {
+          builtDriver = builder.build();
+          sandboxedDriver = new SandboxedDriver(
+              builtDriver, wdSandbox, sandboxedDriverListener);
         }
-        var builtWd = builder.build();
-        isDriverBuilt = true;
-        sandboxedDriverListener.onDriverBuild(builtWd, capabilities, wdSandbox);
-        return new SandboxedDriver(builtWd, wdSandbox, sandboxedDriverListener);
-      };
+        sandboxedDriverListener.onDriverBuild(
+            builtDriver, capabilities, wdSandbox);
+        return sandboxedDriver;
+      }.bind(this));
     }
 
     return {
@@ -182,6 +186,6 @@ exports.createSandboxedWdNamespace = function(
         Key: wdSandbox.Key,
         promise: wdSandbox.promise,
         process: wdSandbox.process
-    };
+      };
   });
 };

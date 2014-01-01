@@ -37,7 +37,7 @@ const DWORD EXIT_TIMEOUT = 120000;
 const DWORD DEFAULT_TEST_TIMEOUT = 120;
 const DWORD DEFAULT_ACTIVITY_TIMEOUT = 2000;
 const DWORD DEFAULT_STARTUP_DELAY = 10;
-const DWORD DEFAULT_POLLING_DELAY = 15;
+const DWORD DEFAULT_POLLING_DELAY = 5;
 const DWORD UPLOAD_RETRY_COUNT = 5;
 const DWORD UPLOAD_RETRY_DELAY = 10;
 
@@ -45,17 +45,20 @@ const DWORD UPLOAD_RETRY_DELAY = 10;
 const DWORD SECONDS_TO_MS = 1000;
 
 class WptTest;
+class WptStatus;
 
 class BrowserSettings {
 public:
   BrowserSettings(){}
   ~BrowserSettings(){}
-  bool Load(const TCHAR * browser, const TCHAR * iniFile);
-  void ResetProfile();
+  bool Load(const TCHAR * browser, const TCHAR * iniFile, CString client);
+  bool Install(CString browser, CString url, CString md5);
+  void ResetProfile(bool clear_certs);
   void GetStandardDirectories();
   void ClearWinInetCache();
   void ClearWebCache();
-
+  void CleanupCustomBrowsers(CString browser);
+  
   CString _browser;
   CString _template;
   CString _exe;
@@ -85,11 +88,11 @@ public:
 // dynamic settings loaded from file
 class WptSettings {
 public:
-  WptSettings(void);
+  WptSettings(WptStatus &status);
   ~WptSettings(void);
   bool Load(void);
   void LoadFromEC2(void);
-  bool SetBrowser(CString browser);
+  bool SetBrowser(CString browser, CString url, CString md5, CString client);
   bool PrepareTest(WptTest& test);
   bool GetUrlText(CString url, CString &response);
   bool UpdateSoftware();
@@ -105,7 +108,9 @@ public:
   CString _web_page_replay_host;
   CString _ini_file;
   CString _ec2_instance;
+  CString _clients_directory;
 
   BrowserSettings _browser;
   SoftwareUpdate _software_update;
+  WptStatus &_status;
 };

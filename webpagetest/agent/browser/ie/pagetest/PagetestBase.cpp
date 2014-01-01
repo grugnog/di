@@ -54,6 +54,7 @@ CPagetestBase::CPagetestBase(void):
   , imageQuality(JPEG_DEFAULT_QUALITY)
   , pngScreenShot(0)
   , bodies(0)
+  , htmlbody(0)
   , keepua(0)
   , minimumDuration(0)
   , clearShortTermCacheSecs(0)
@@ -62,17 +63,17 @@ CPagetestBase::CPagetestBase(void):
   , _GDIWindowUpdated(NULL)
   , windowUpdated(false)
   , hGDINotifyWindow(NULL)
-  , aft(0)
   , titleTime(0)
   , currentRun(0)
 {
-	QueryPerformanceFrequency((LARGE_INTEGER *)&freq);
+	QueryPerfFrequency(freq);
 	msFreq = freq / (__int64)1000;
 	
 	winInetRequests.InitHashTable(257);
 	requestSocketIds.InitHashTable(257);
 	threadWindows.InitHashTable(257);
 	openSockets.InitHashTable(257);
+  client_ports.InitHashTable(257);
 
 	// create a NULL DACL we will re-use everywhere we do file access
 	ZeroMemory(&nullDacl, sizeof(nullDacl));
@@ -190,8 +191,13 @@ void CPagetestBase::Reset(void)
     pageTitle.Empty();
 		layoutChanged.RemoveAll();
 		active = false;
-    capturingAFT = false;
 		url.Empty();
+    startCPU.dwHighDateTime = startCPU.dwLowDateTime = 0;
+    docCPU.dwHighDateTime = docCPU.dwLowDateTime = 0;
+    endCPU.dwHighDateTime = endCPU.dwLowDateTime = 0;
+    startCPUtotal.dwHighDateTime = startCPUtotal.dwLowDateTime = 0;
+    docCPUtotal.dwHighDateTime = docCPUtotal.dwLowDateTime = 0;
+    endCPUtotal.dwHighDateTime = endCPUtotal.dwLowDateTime = 0;
 		
 		gzipScore = -1;
 		doctypeScore = -1;
@@ -203,6 +209,7 @@ void CPagetestBase::Reset(void)
 		cookieScore = -1;
 		minifyScore = -1;
 		compressionScore = -1;
+		progressiveJpegScore = -1;
 		etagScore = -1;
     adultSite = 0;
 
@@ -221,6 +228,7 @@ void CPagetestBase::Reset(void)
 		DeleteImages();
 
     m_spChromeFrame.Release();
+    dev_tools_.Reset();
 
 	}__except(EXCEPTION_EXECUTE_HANDLER)
 	{
@@ -452,6 +460,39 @@ CComPtr<IHTMLElement> CPagetestBase::FindDomElementByAttribute(CString attrVal)
 }
 
 /*-----------------------------------------------------------------------------
+  Converts a IHTMLWindow2 object to a IWebBrowser2.
+  Returns NULL in case of failure.
+-----------------------------------------------------------------------------*/
+CComQIPtr<IWebBrowser2> HtmlWindowToHtmlWebBrowser(
+    CComQIPtr<IHTMLWindow2> window) {
+  CComQIPtr<IWebBrowser2> browser;
+  CComQIPtr<IServiceProvider> provider = window;
+  if (provider)
+    provider->QueryService(IID_IWebBrowserApp, IID_IWebBrowser2,
+                           (void**)&browser);
+  return browser;
+}
+
+/*-----------------------------------------------------------------------------
+	Convert a window to a document, accounting for cross-domain security
+  issues.
+-----------------------------------------------------------------------------*/
+CComQIPtr<IHTMLDocument2> HtmlWindowToHtmlDocument(
+    CComQIPtr<IHTMLWindow2> window) {
+  CComQIPtr<IHTMLDocument2> document;
+  if (!SUCCEEDED(window->get_document(&document))) {
+    CComQIPtr<IWebBrowser2>  browser = HtmlWindowToHtmlWebBrowser(window);
+    if (browser) {
+      CComQIPtr<IDispatch> disp;
+      if(SUCCEEDED(browser->get_Document(&disp)) && disp)
+        document = disp;
+    }
+  }
+  return document;
+}
+
+
+/*-----------------------------------------------------------------------------
 	Locate the first HTML element on the DOM of any of the browsers that
 	matches the attribute we're looking for
 -----------------------------------------------------------------------------*/
@@ -643,45 +684,7 @@ CComPtr<IHTMLElement> CPagetestBase::FindDomElementByAttribute(CString &tag, CSt
 			}
 		}
 
-		// walk the IFrames using OLE (to bypass security blocks)
-		if( !result )
-		{
-			// walk all of the frames on the document
-			// this is a little complicated because we need to bypass cross site scripting security
-			CComQIPtr<IOleContainer> ole(doc);
-			if(ole)
-			{
-				CComPtr<IEnumUnknown> objects;
-
-				// Get an enumerator for the frames
-				if( SUCCEEDED(ole->EnumObjects(OLECONTF_EMBEDDINGS, &objects)) && objects )
-				{
-					IUnknown* pUnk;
-					ULONG uFetched;
-
-					// Enumerate all the frames
-					while( !result && S_OK == objects->Next(1, &pUnk, &uFetched) )
-					{
-						// QI for IWebBrowser here to see if we have an embedded browser
-						CComQIPtr<IWebBrowser2> browser(pUnk);
-						pUnk->Release();
-
-						if (browser)
-						{
-							CComPtr<IDispatch> disp;
-							if( SUCCEEDED(browser->get_Document(&disp)) && disp )
-							{
-								CComQIPtr<IHTMLDocument2> frameDoc(disp);
-								if (frameDoc)
-									result = FindDomElementByAttribute(tag, attribute, value, op, frameDoc);
-							}
-						}
-					}
-				}
-			}			
-		}
-
-		// walk the IFrames diriectly (the OLE way doesn't appear to always work)
+		// recursively check in any iFrames
 		if( !result )
 		{
 			// walk all of the frames on the document
@@ -703,7 +706,8 @@ CComPtr<IHTMLElement> CPagetestBase::FindDomElementByAttribute(CString &tag, CSt
 							if( window )
 							{
 								CComQIPtr<IHTMLDocument2> frameDoc;
-								if( SUCCEEDED(window->get_document(&frameDoc)) && frameDoc )
+								frameDoc = HtmlWindowToHtmlDocument(window);
+								if( frameDoc )
 									result = FindDomElementByAttribute(tag, attribute, value, op, frameDoc);
 							}
 						}
@@ -735,32 +739,27 @@ DWORD CPagetestBase::CountDOMElements(CComQIPtr<IHTMLDocument2> &doc)
       coll.Release();
     }
 
-    // walk any/all iFrames
-		CComQIPtr<IOleContainer> ole(doc);
-		if(ole)
-		{
-			CComPtr<IEnumUnknown> objects;
-			if( SUCCEEDED(ole->EnumObjects(OLECONTF_EMBEDDINGS, &objects)) && objects )
-			{
-				IUnknown* pUnk;
-				ULONG uFetched;
-				while( S_OK == objects->Next(1, &pUnk, &uFetched) )
-				{
-					CComQIPtr<IWebBrowser2> browser(pUnk);
-					pUnk->Release();
-					if (browser)
-					{
-						CComPtr<IDispatch> disp;
-						if( SUCCEEDED(browser->get_Document(&disp)) && disp )
-						{
-							CComQIPtr<IHTMLDocument2> frameDoc(disp);
-							if (frameDoc)
-								count += CountDOMElements(frameDoc);
-						}
-					}
-				}
-			}
-		}			
+    // Recursively walk any iFrames
+    IHTMLFramesCollection2 * frames = NULL;
+    if (doc->get_frames(&frames) && frames) {
+      long num_frames = 0;
+      if (SUCCEEDED(frames->get_length(&num_frames))) {
+        for (long i = 0; i < num_frames; i++) {
+          _variant_t index = i;
+          _variant_t varFrame;
+          if (SUCCEEDED(frames->item(&index, &varFrame))) {
+            CComQIPtr<IHTMLWindow2> window(varFrame);
+            if (window) {
+              CComQIPtr<IHTMLDocument2> frameDoc;
+              frameDoc = HtmlWindowToHtmlDocument(window);
+              if (frameDoc)
+                count += CountDOMElements(frameDoc);
+            }
+          }
+        }
+      }
+      frames->Release();
+    }
   }
 
   return count;
@@ -998,4 +997,51 @@ void  CPagetestBase::SetBrowserWindowUpdated(bool updated)
 void CPagetestBase::ChromeFrame(CComPtr<IChromeFrame> chromeFrame)
 {
   m_spChromeFrame = chromeFrame;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CPagetestBase::GetCPUTime(FILETIME &cpu_time, FILETIME &total_time) {
+  FILETIME idle_time, kernel_time, user_time;
+  if (GetSystemTimes(&idle_time, &kernel_time, &user_time)) {
+    ULARGE_INTEGER k, u, i, combined, total;
+    k.LowPart = kernel_time.dwLowDateTime;
+    k.HighPart = kernel_time.dwHighDateTime;
+    u.LowPart = user_time.dwLowDateTime;
+    u.HighPart = user_time.dwHighDateTime;
+    i.LowPart = idle_time.dwLowDateTime;
+    i.HighPart = idle_time.dwHighDateTime;
+    total.QuadPart = (k.QuadPart + u.QuadPart);
+    combined.QuadPart = total.QuadPart - i.QuadPart;
+    cpu_time.dwHighDateTime = combined.HighPart;
+    cpu_time.dwLowDateTime = combined.LowPart;
+    total_time.dwHighDateTime = total.HighPart;
+    total_time.dwLowDateTime = total.LowPart;
+  }
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+double CPagetestBase::GetElapsedMilliseconds(FILETIME &start, FILETIME &end) {
+  double elapsed = 0;
+  ULARGE_INTEGER s, e;
+  s.LowPart = start.dwLowDateTime;
+  s.HighPart = start.dwHighDateTime;
+  e.LowPart = end.dwLowDateTime;
+  e.HighPart = end.dwHighDateTime;
+  if (e.QuadPart > s.QuadPart)
+    elapsed = (double)(e.QuadPart - s.QuadPart) / 10000.0;
+
+  return elapsed;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+int CPagetestBase::GetCPUUtilization(FILETIME &start, FILETIME &end, FILETIME &startTotal, FILETIME &endTotal) {
+  int utilization = 0;
+  double cpu = GetElapsedMilliseconds(start, end);
+  double total = GetElapsedMilliseconds(startTotal, endTotal);
+  if (cpu > 0.0 && total > 0.0)
+    utilization = min((int)(((cpu / total) * 100) + 0.5), 100);
+  return utilization;
 }

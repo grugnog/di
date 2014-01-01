@@ -39,6 +39,15 @@ goog.provide('wpt.contentScript');
 
 var DOM_ELEMENT_POLL_INTERVAL = 100;
 
+// override alert boxes
+var injected = document.createElement("script");
+injected.type = "text/javascript";
+injected.innerHTML =
+  "window.alert = function(msg){console.log('Blocked alert: ' + msg);};\n" +
+  "window.confirm = function(msg){console.log('Blocked confirm: ' + msg); return false;};\n" + 
+  "window.prompt = function(msg,def){console.log('Blocked prompt: ' + msg); return null;};\n";
+document.documentElement.appendChild(injected);
+
 // If the namespace is not set up by goog.provide, define the objects
 // it would set up.  We could avoid this sort of hackery by injecting
 // base.js before injecting this script, but the script injection
@@ -56,7 +65,30 @@ window.goog['isNull'] = window.goog['isNull'] || function(val) {
 /**
  * @private
  */
-wpt.contentScript.reportTiming_ = function() {
+wpt.contentScript.collectStats_ = function() {
+  // look for any user timing data
+  try {
+    if (window['performance'] != undefined &&
+        (window.performance.getEntriesByType ||
+         window.performance.webkitGetEntriesByType)) {
+      if (window.performance.getEntriesByType)
+        var marks = window.performance.getEntriesByType("mark");
+      else
+        var marks = window.performance.webkitGetEntriesByType("mark");
+      if (marks.length)
+        chrome.extension.sendRequest({'message': 'wptMarks', 
+                                      'marks': marks },
+                                     function(response) {});
+    }
+  } catch(e){
+  }
+
+  var domCount = document.documentElement.getElementsByTagName("*").length;
+  if (domCount === undefined)
+    domCount = 0;
+  chrome.extension.sendRequest({'message': 'wptStats',
+                                'domCount': domCount}, function(response) {});
+  
   var timingRequest = { 'message': 'wptWindowTiming' };
   function addTime(name) {
     if (window.performance.timing[name] > 0) {
@@ -69,16 +101,57 @@ wpt.contentScript.reportTiming_ = function() {
   addTime('domContentLoadedEventEnd');
   addTime('loadEventStart');
   addTime('loadEventEnd');
+  timingRequest['msFirstPaint'] = 0;
+  if (window['chrome'] !== undefined &&
+      window.chrome['loadTimes'] !== undefined) {
+    var chromeTimes = window.chrome.loadTimes();
+    if (chromeTimes['firstPaintTime'] !== undefined &&
+        chromeTimes['firstPaintTime'] > 0) {
+      var startTime = chromeTimes['requestTime'] ? chromeTimes['requestTime'] : chromeTimes['startLoadTime'];
+      if (chromeTimes['firstPaintTime'] >= startTime)
+        timingRequest['msFirstPaint'] = (chromeTimes['firstPaintTime'] - startTime) * 1000.0;
+    }
+  }
 
   // Send the times back to the extension.
   chrome.extension.sendRequest(timingRequest, function(response) {});
 };
 
+wpt.contentScript.checkResponsive_ = function() {
+  var response = { 'message': 'wptResponsive' };
+  
+  // check to see if any form of the inner width is bigger than the window size (scroll bars)
+  // default to assuming that the site is responsive and only trigger if we see a case where
+  // we likely have scroll bars
+  var isResponsive = 1;
+  var bsw = document.body.scrollWidth;
+  var desw = document.documentElement.scrollWidth;
+  var wiw = window.innerWidth;
+  if (bsw > wiw)
+    isResponsive = 0;
+  var nodes = document.body.childNodes;
+  for (i in nodes) { 
+    if (nodes[i].scrollWidth > wiw)
+      isResponsive = 0;
+  }
+  response['isResponsive'] = isResponsive;
+  
+  chrome.extension.sendRequest(response, function() {});
+}
+
 // This script is automatically injected into every page before it loads.
 // We need to use it to register for the earliest onLoad callback
 // since the navigation timing times are sometimes questionable.
 window.addEventListener('load', function() {
-  window.setTimeout(wpt.contentScript.reportTiming_, 0);
+  var timestamp = 0;
+  if (window['performance'] != undefined)
+    timestamp = window.performance.now();
+  var fixedViewport = 0;
+  if (document.querySelector("meta[name=viewport]"))
+    fixedViewport = 1;
+  chrome.extension.sendRequest({'message': 'wptLoad',
+                                'fixedViewport': fixedViewport,
+                                'timestamp': timestamp}, function(response) {});
 }, false);
 
 
@@ -163,6 +236,10 @@ chrome.extension.onRequest.addListener(
       g_intervalId = window.setInterval(
           function() { pollDOMElement(); },
           DOM_ELEMENT_POLL_INTERVAL);
+    } else if (request.message == 'collectStats') {
+      wpt.contentScript.collectStats_();
+    } else if (request.message == 'checkResponsive') {
+      wpt.contentScript.checkResponsive_();
     }
     sendResponse({});
 });

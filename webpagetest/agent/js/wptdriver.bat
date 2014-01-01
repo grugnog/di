@@ -1,4 +1,9 @@
 @echo off
+rem Copyright 2013 Google Inc. All Rights Reserved.
+rem Author: wrightt@google.com (Todd Wright)
+rem
+rem TODO update to match wptdriver.sh
+
 set DP0=%~dp0
 set WPT_SERVER=http://localhost:8888
 set LOCATION=Test
@@ -68,7 +73,6 @@ set WPT_ROOT=%CD%
 cd %DP0%
 
 set AGENT=%WPT_ROOT%\agent\js
-set DEVTOOLS2HAR_JAR=%WPT_ROOT%\webpagetest\lib\dt2har\target\dt2har-1.1-SNAPSHOT-jar-with-dependencies.jar
 
 rem Find the latest version of WD server jar, WDJS, platform-specific chromedriver
 for %%J in (%WPT_ROOT%\lib\webdriver\java\selenium-standalone-*.jar) do set SELENIUM_JAR=%%J
@@ -79,4 +83,4 @@ for %%E in (%WPT_ROOT%\lib\webdriver\chromedriver\Win32\chromedriver-*.exe) do s
 
 set NODE_PATH="%AGENT%;%AGENT%\src;%WDJS_DIR%
 
-node src\agent_main --wpt_server %WPT_SERVER% --location %LOCATION% --chromedriver %CHROMEDRIVER% --selenium_jar %SELENIUM_JAR% --devtools2har_jar=%DEVTOOLS2HAR_JAR%
+node src\agent_main --serverUrl %WPT_SERVER% --location %LOCATION% --chromedriver %CHROMEDRIVER% --seleniumJar %SELENIUM_JAR%

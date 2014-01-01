@@ -32,12 +32,13 @@ class WptHook;
 class WptTestHook;
 class TestState;
 class Requests;
+class DevTools;
+class Trace;
 
-class TestServer
-{
+class TestServer {
 public:
   TestServer(WptHook& hook, WptTestHook &test, TestState& test_state, 
-            Requests& requests);
+             Requests& requests, DevTools &dev_tools, Trace &trace);
   ~TestServer(void);
 
   bool Start(void);
@@ -52,6 +53,8 @@ private:
   WptTestHook&      test_;
   TestState&        test_state_;
   Requests&         requests_;
+  DevTools          &dev_tools_;
+  Trace             &trace_;
   CRITICAL_SECTION  cs;
 
   void SendResponse(struct mg_connection *conn,
@@ -60,7 +63,10 @@ private:
                     CStringA response_code_string,
                     CStringA response_data);
   CString GetParam(const CString query_string, const CString key) const;
-  DWORD GetDwordParam(const CString query_string, const CString key) const;
+  bool GetDwordParam(const CString query_string, const CString key,
+                     DWORD& value) const;
+  bool GetIntParam(const CString query_string, const CString key,
+                   int& value) const;
   CString GetUnescapedParam(const CString query_string,
                              const CString key) const;
   CString GetPostBody(struct mg_connection *conn,

@@ -39,6 +39,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 static const TCHAR * DOCUMENT_WINDOW_CLASSES[] = {
   _T("Internet Explorer_Server"),
   _T("Chrome_RenderWidgetHostHWND"),
+  _T("Chrome_WidgetWin_1"),
   _T("MozillaWindowClass"),
   _T("WebKit2WebViewWindowClass")
 };
@@ -125,10 +126,12 @@ void CopyDirectoryTree(CString source, CString destination) {
         if (lstrcmp(fd.cFileName, _T(".")) && lstrcmp(fd.cFileName,_T(".."))) {
           CString src = source + CString(_T("\\")) + fd.cFileName;
           CString dest = destination + CString(_T("\\")) + fd.cFileName;
-          if( fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
+          if( fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ) {
             CopyDirectoryTree(src, dest);
-          else
+          } else {
             CopyFile(src, dest, FALSE);
+            SetFileAttributes(dest, FILE_ATTRIBUTE_NORMAL);
+          }
         }
       }while(FindNextFile(hFind, &fd));
       FindClose(hFind);
@@ -165,21 +168,18 @@ void DeleteRegKey(HKEY hParent, LPCTSTR key, bool remove) {
 
 
 /*-----------------------------------------------------------------------------
-  Recursively check to see if the given window has a child of the same class
-  A buffer is passed so we don't have to keep re-allocating it on the stack
+  Recursively check to see if the given window has a child that is also a
+  browser document.
 -----------------------------------------------------------------------------*/
-static bool HasVisibleChildDocument(HWND parent, const TCHAR * class_name, 
-                            TCHAR * buff, DWORD buff_len) {
+static bool HasVisibleChildDocument(HWND parent) {
   bool has_child_document = false;
   HWND wnd = ::GetWindow(parent, GW_CHILD);
   while (wnd && !has_child_document) {
     if (IsWindowVisible(wnd)) {
-      if (GetClassName(wnd, buff, buff_len) && !lstrcmp(buff, class_name)) {
+      if (IsBrowserDocument(wnd, false))
         has_child_document = true;
-      } else {
-        has_child_document = HasVisibleChildDocument(wnd, class_name, 
-                                                      buff, buff_len);
-      }
+      else
+        has_child_document = HasVisibleChildDocument(wnd);
     }
     wnd = ::GetNextWindow(wnd , GW_HWNDNEXT);
   }
@@ -192,14 +192,15 @@ static bool HasVisibleChildDocument(HWND parent, const TCHAR * class_name,
   - Having a window class of a known type
   - Not having any visible child windows of the same type
 -----------------------------------------------------------------------------*/
-bool IsBrowserDocument(HWND wnd) {
+bool IsBrowserDocument(HWND wnd, bool recurse) {
   bool is_document = false;
   TCHAR class_name[100];
   if (GetClassName(wnd, class_name, _countof(class_name))) {
-    for (int i = 0; i < _countof(DOCUMENT_WINDOW_CLASSES); i++) {
+    for (int i = 0;
+         i < _countof(DOCUMENT_WINDOW_CLASSES) && !is_document;
+         i++) {
       if (!lstrcmp(class_name, DOCUMENT_WINDOW_CLASSES[i])) {
-        if (!HasVisibleChildDocument(wnd, DOCUMENT_WINDOW_CLASSES[i], 
-            class_name, _countof(class_name))) {
+        if (!recurse || !HasVisibleChildDocument(wnd)) {
           is_document = true;
         }
       }
@@ -218,11 +219,10 @@ static HWND FindDocumentWindow(DWORD process_id, HWND parent) {
     if (IsWindowVisible(wnd)) {
       DWORD pid;
       GetWindowThreadProcessId(wnd, &pid);
-      if (pid == process_id && IsBrowserDocument(wnd)) {
+      if (pid == process_id && IsBrowserDocument(wnd))
         document_window = wnd;
-      } else {
+      else
         document_window = FindDocumentWindow(process_id, wnd);
-      }
     }
     wnd = ::GetNextWindow(wnd , GW_HWNDNEXT);
   }
@@ -387,10 +387,12 @@ CString HttpGetText(CString url) {
                                     INTERNET_OPEN_TYPE_PRECONFIG,
                                     NULL, NULL, 0);
   if (internet) {
-    DWORD timeout = 30000;
+    DWORD timeout = 300000;
     InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT, 
                       &timeout, sizeof(timeout));
     InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT, 
+                      &timeout, sizeof(timeout));
+    InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT, 
                       &timeout, sizeof(timeout));
     HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
                                 INTERNET_FLAG_NO_CACHE_WRITE | 
@@ -430,8 +432,13 @@ DWORD HttpSaveFile(CString url, CString file) {
                                     INTERNET_OPEN_TYPE_PRECONFIG,
                                     NULL, NULL, 0);
   if (internet) {
-    DWORD timeout = 30000;
+    DWORD timeout = 300000;
+    DWORD fetch_timeout = 360000;
     InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT, 
+                      &timeout, sizeof(timeout));
+    InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT, 
+                      &fetch_timeout, sizeof(fetch_timeout));
+    InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT, 
                       &timeout, sizeof(timeout));
     HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
                                 INTERNET_FLAG_NO_CACHE_WRITE | 
@@ -610,4 +617,38 @@ void TerminateProcessById(DWORD pid) {
     WaitForSingleObject(process, 120000);
     CloseHandle(process);
   }
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void QueryPerfCounter(__int64 &counter) {
+  LARGE_INTEGER counter_struct;
+  counter_struct.QuadPart = 0;
+  QueryPerformanceCounter(&counter_struct);
+  counter = counter_struct.QuadPart;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void QueryPerfFrequency(__int64 &freq) {
+  LARGE_INTEGER freq_struct;
+  freq_struct.QuadPart = 0;
+  QueryPerformanceFrequency(&freq_struct);
+  freq = freq_struct.QuadPart;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+int ElapsedFileTimeSeconds(FILETIME& check, FILETIME& now) {
+  int elapsed = -1;
+  ULARGE_INTEGER c, n, e;
+  c.HighPart = check.dwHighDateTime;
+  c.LowPart = check.dwLowDateTime;
+  n.HighPart = now.dwHighDateTime;
+  n.LowPart = now.dwLowDateTime;
+  if (n.QuadPart > c.QuadPart) {
+    e.QuadPart = (n.QuadPart - c.QuadPart) / 10000000;
+    elapsed = (int)e.QuadPart;
+  }
+  return elapsed;
 }

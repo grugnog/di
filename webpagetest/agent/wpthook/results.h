@@ -37,11 +37,14 @@ class ScreenCapture;
 class CxImage;
 class WptTest;
 class OptimizationChecks;
+class DevTools;
+class Trace;
 
 class Results {
 public:
   Results(TestState& test_state, WptTest& test, Requests& requests, 
-          TrackSockets& sockets, TrackDns& dns, ScreenCapture& screen_capture);
+          TrackSockets& sockets, TrackDns& dns, ScreenCapture& screen_capture,
+          DevTools &dev_tools, Trace &trace);
   ~Results(void);
 
   void Reset(void);
@@ -58,6 +61,8 @@ private:
   TrackDns&     _dns;
   ScreenCapture& _screen_capture;
   WptTest&      _test;
+  DevTools      &_dev_tools;
+  Trace         &_trace;
   bool          _saved;
   LARGE_INTEGER _visually_complete;
 
@@ -69,8 +74,25 @@ private:
   int           base_page_address_count_;
   bool          adult_site_;
 
+  int count_connect_;
+  int count_connect_doc_;
+  int count_dns_;
+  int count_dns_doc_;
+  int count_ok_;
+  int count_ok_doc_;
+  int count_redirect_;
+  int count_redirect_doc_;
+  int count_not_modified_;
+  int count_not_modified_doc_;
+  int count_not_found_;
+  int count_not_found_doc_;
+  int count_other_;
+  int count_other_doc_;
+
+  DWORD peak_memory_;
+  DWORD peak_process_count_;
+
   void ProcessRequests(void);
-  void CalculateAFT(void);
   void SavePageData(OptimizationChecks&);
   void SaveRequests(OptimizationChecks&);
   void SaveRequest(HANDLE file, HANDLE headers, Request * request, int index);
@@ -78,11 +100,13 @@ private:
   void SaveVideo(void);
   void SaveProgressData(void);
   void SaveStatusMessages(void);
-  void SaveImage(CxImage& image, CString file, bool shrink, BYTE quality);
+  void SaveImage(CxImage& image, CString file, BYTE quality,
+                 bool force_small = false);
   bool ImagesAreDifferent(CxImage * img1, CxImage* img2);
   CStringA FormatTime(LARGE_INTEGER t);
   void SaveResponseBodies(void);
   void SaveConsoleLog(void);
-  void SaveTimeline(void);
+  void SaveTimedEvents(void);
   void SaveHistogram(CxImage& image, CString file);
+  bool NativeRequestExists(Request * browser_request);
 };

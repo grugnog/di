@@ -50,12 +50,13 @@ TrackDns::~TrackDns(void){
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void * TrackDns::LookupStart(CString& name) {
-  if (name == _T("127.0.0.1"))
+  if (!name.GetLength() || name == _T("127.0.0.1"))
     return NULL;
 
   WptTrace(loglevel::kFrequentEvent, 
             _T("[wshook] (%d) DNS Lookup for '%s' started\n"), 
               GetCurrentThreadId(), (LPCTSTR)name);
+  CheckCDN(name, name);
 
   // we need to check for overrides even if we aren't active
   DnsInfo * info = new DnsInfo(name);
@@ -77,6 +78,7 @@ void * TrackDns::LookupStart(CString& name) {
 void TrackDns::LookupAddress(void * context, ULONG &addr) {
   if (context) {
     DnsInfo * info = (DnsInfo *)context;
+    EnterCriticalSection(&cs);
     AddAddress(info->_name, addr);
     CString host;
     if (info->_tracked && !_dns_hosts.Lookup(addr, host) || host.IsEmpty()) {
@@ -84,6 +86,7 @@ void TrackDns::LookupAddress(void * context, ULONG &addr) {
     }
     if( info->_override_addr.S_un.S_addr )
       addr = info->_override_addr.S_un.S_addr;
+    LeaveCriticalSection(&cs);
     IN_ADDR address;
     address.S_un.S_addr = addr;
     WptTrace(loglevel::kFrequentEvent, 
@@ -96,6 +99,12 @@ void TrackDns::LookupAddress(void * context, ULONG &addr) {
       ,address.S_un.S_un_b.s_b4);
     _test_state.ActivityDetected();
   }
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void TrackDns::LookupAlias(CString name, CString alias) {
+  CheckCDN(name, alias);
 }
 
 /*-----------------------------------------------------------------------------
@@ -193,7 +202,9 @@ LONGLONG TrackDns::GetEarliest(LONGLONG& after) {
 -----------------------------------------------------------------------------*/
 CString TrackDns::GetHost(ULONG addr) {
   CString host;
+  EnterCriticalSection(&cs);
   _dns_hosts.Lookup(addr, host);
+  LeaveCriticalSection(&cs);
   return host;
 }
 
@@ -201,6 +212,7 @@ CString TrackDns::GetHost(ULONG addr) {
 -----------------------------------------------------------------------------*/
 void TrackDns::AddAddress(CString host, DWORD address) {
   bool found = false;
+  EnterCriticalSection(&cs);
   POSITION pos = _host_addresses.GetHeadPosition();
   while (pos && !found) {
     DnsHostAddresses& host_addresses = _host_addresses.GetNext(pos);
@@ -215,6 +227,7 @@ void TrackDns::AddAddress(CString host, DWORD address) {
     host_addresses.AddAddress(address);
     _host_addresses.AddTail(host_addresses);
   }
+  LeaveCriticalSection(&cs);
 }
 
 /*-----------------------------------------------------------------------------
@@ -222,6 +235,7 @@ void TrackDns::AddAddress(CString host, DWORD address) {
 int TrackDns::GetAddressCount(CString host) {
   int count = 0;
   bool found = false;
+  EnterCriticalSection(&cs);
   POSITION pos = _host_addresses.GetHeadPosition();
   while (pos && !found) {
     DnsHostAddresses& host_addresses = _host_addresses.GetNext(pos);
@@ -230,5 +244,64 @@ int TrackDns::GetAddressCount(CString host) {
       found = true;
     }
   }
+  LeaveCriticalSection(&cs);
   return count;
+}
+
+// Use the globally defined CDN list from header file cdn.h
+typedef struct {
+  CStringA pattern;
+  CStringA name;
+} CDN_PROVIDER;
+extern CDN_PROVIDER cdnList[];
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void TrackDns::CheckCDN(CString host, CString name) {
+  CDN_PROVIDER * cdn = cdnList;
+  CStringA provider;
+  CStringA name_a = (LPCSTR)CT2A(name);
+  CStringA host_a = (LPCSTR)CT2A(host);
+  while (provider.IsEmpty() &&
+         cdn->pattern && 
+         cdn->pattern.CompareNoCase("END_MARKER"))  {
+    if (name_a.Find(cdn->pattern) >= 0)
+      provider = cdn->name;
+    cdn++;
+  }
+  if (!provider.IsEmpty()) {
+    // add an entry for the host name if we don't already have one
+    bool found = false;
+    EnterCriticalSection(&cs);
+    POSITION pos = _cdn_hosts.GetHeadPosition();
+    while (pos && !found) {
+      CDNEntry &entry = _cdn_hosts.GetNext(pos);
+      found = entry._name == host_a;
+    }
+    if (!found) {
+      CDNEntry entry;
+      entry._name = host_a;
+      entry._provider = provider;
+      _cdn_hosts.AddTail(entry);
+    }
+    LeaveCriticalSection(&cs);
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Return the CDN provider (if any) for the given host name
+-----------------------------------------------------------------------------*/
+CStringA TrackDns::GetCDNProvider(CString host) {
+  CStringA provider;
+  EnterCriticalSection(&cs);
+  if (!_cdn_hosts.IsEmpty()) {
+    POSITION pos = _cdn_hosts.GetHeadPosition();
+    while (provider.IsEmpty() && pos) {
+      CDNEntry &entry = _cdn_hosts.GetNext(pos);
+      if (!host.CompareNoCase((LPCTSTR)CA2T(entry._name)))
+        provider = entry._provider;
+    }
+  }
+  LeaveCriticalSection(&cs);
+  return provider;
 }

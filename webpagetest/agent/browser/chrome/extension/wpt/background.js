@@ -29,6 +29,8 @@
 
  ******************************************************************************/
 
+var g_tabid = 0;
+
 goog.require('wpt.chromeDebugger');
 goog.require('wpt.chromeExtensionUtils');
 goog.require('wpt.commands');
@@ -47,7 +49,7 @@ goog.provide('wpt.main');
  *
  * @const
  */
-var STARTUP_DELAY = 5000;
+var STARTUP_DELAY = 1000;
 
 /** @const */
 var TASK_INTERVAL = 1000;
@@ -75,12 +77,17 @@ var UNWANTED_EXTENSIONS = [
 // regex to extract a host name from a URL
 var URL_REGEX = /([htps:]*\/\/)([^\/]+)(.*)/i;
 
+var STARTUP_URL = 'http://127.0.0.1:8888/blank2.html';
+
+var g_starting = false;
 var g_active = false;
 var g_start = 0;
 var g_requesting_task = false;
+var g_processing_task = false;
 var g_commandRunner = null;  // Will create once we know the tab id under test.
 var g_debugWindow = null;  // May create at window onload.
 var g_overrideHosts = {};
+var g_started = false;
 
 /**
  * Uninstall a given set of extensions.  Run |onComplete| when done.
@@ -119,50 +126,40 @@ wpt.main.uninstallUnwantedExtensions = function(idsToUninstall, onComplete) {
 };
 
 wpt.main.onStartup = function() {
-  // Before we start, remove any other extensions that could change our
-  // results.
-  window.setTimeout(function() {
-    wpt.main.uninstallUnwantedExtensions(UNWANTED_EXTENSIONS, function() {
-      // When uninstalls finish, kick off our testing.
-      wpt.main.startMeasurements();
-    });
-  }, STARTUP_DELAY);
+  wpt.main.uninstallUnwantedExtensions(UNWANTED_EXTENSIONS, function() {
+    // When uninstalls finish, kick off our testing.
+    wpt.main.startMeasurements();
+  });
 };
 
 wpt.main.startMeasurements = function() {
   wpt.LOG.info('Enter wptStartMeasurements');
-
-  // All measurements are done in a tab.  Get the foreground tab,
-  // and remember its ID.  This ID is used to open a connection to
-  // the content script running in the web page hosted within the tab.
-  // to the content script in a
-  var queryForFocusedTab = {
-    'active': true,
-    'windowId': chrome.windows.WINDOW_ID_CURRENT
-  };
-
-  chrome.tabs.query(queryForFocusedTab, function(focusedTabs) {
-    if (focusedTabs.length != 1) {
-      wpt.LOG.error('There should be exactly one focused tab, but ' +
-                    'chrome.tabs.query() returned ' + focusedTabs.length +
-                    '.  Is the query details object incorrect?  tabs = ' +
-                    JSON.stringify(focusedTabs, null, 2));
-    }
-    // Use the first one even if the length is not the expected value.
-    var tab = focusedTabs[0];
-    wpt.LOG.info('Got tab id: ' + tab.id);
-    g_commandRunner = new wpt.commands.CommandRunner(tab.id, window.chrome);
-    wpt.chromeDebugger.Init(tab.id, window.chrome);
-
-    if (RUN_FAKE_COMMAND_SEQUENCE) {
-      // Run the tasks in FAKE_TASKS.
-      window.setInterval(wptFeedFakeTasks, FAKE_TASK_INTERVAL);
-    } else {
-      // Fetch tasks from wptdriver.exe .
-      window.setInterval(wptGetTask, TASK_INTERVAL);
-    }
-  });
+  if (RUN_FAKE_COMMAND_SEQUENCE) {
+    // Run the tasks in FAKE_TASKS.
+    window.setInterval(wptFeedFakeTasks, FAKE_TASK_INTERVAL);
+  } else {
+    // Fetch tasks from wptdriver.exe.
+    window.setInterval(wptGetTask, TASK_INTERVAL);
+  }
 }
+
+// Install an onLoad handler for all tabs.
+chrome.tabs.onUpdated.addListener(function(tabId, props) {
+  if (!g_started && g_starting && props.status == 'complete') {
+    // handle the startup sequencing (attach the debugger
+    // after the browser loads and then start testing).
+    g_started = true;
+    wpt.main.onStartup();
+  }else if (g_active && tabId == g_tabid) {
+    if (props.status == 'loading') {
+      g_start = new Date().getTime();
+      wptSendEvent('navigate', '');
+    } else if (props.status == 'complete') {
+      wptSendEvent('complete', '');
+    }
+  }
+});
+
 
 /**
  * Build a fake command record.
@@ -222,8 +219,7 @@ function wptFeedFakeTasks() {
 
 // Get the next task from the wptdriver
 function wptGetTask() {
-  wpt.LOG.info('wptGetTask');
-  if (!g_requesting_task) {
+  if (!g_requesting_task && !g_processing_task) {
     g_requesting_task = true;
     try {
       var xhr = new XMLHttpRequest();
@@ -233,59 +229,56 @@ function wptGetTask() {
           return;
         if (xhr.status != 200) {
           wpt.LOG.warning('Got unexpected (not 200) XHR status: ' + xhr.status);
+          g_requesting_task = false;
           return;
         }
         var resp = JSON.parse(xhr.responseText);
         if (resp.statusCode != 200) {
           wpt.LOG.warning('Got unexpected status code ' + resp.statusCode);
+          g_requesting_task = false;
           return;
         }
         if (!resp.data) {
-          wpt.LOG.warning('No data?');
+          g_requesting_task = false;
           return;
         }
         wptExecuteTask(resp.data);
+        g_requesting_task = false;
       };
       xhr.onerror = function() {
         wpt.LOG.warning('Got an XHR error!');
+        g_requesting_task = false;
       };
       xhr.send();
     } catch (err) {
       wpt.LOG.warning('Error getting task: ' + err);
+      g_requesting_task = false;
     }
-    g_requesting_task = false;
   }
 }
 
-function wptSendEvent(event_name, query_string) {
+function wptSendEvent(event_name, query_string, data) {
   try {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', 'http://127.0.0.1:8888/event/' + event_name + query_string,
              true);
-    xhr.send();
+    xhr.send(data);
   } catch (err) {
     wpt.LOG.warning('Error sending page load XHR: ' + err);
   }
 }
 
-// Install an onLoad handler for all tabs.
-chrome.tabs.onUpdated.addListener(function(tabId, props) {
-  if (g_active) {
-    if (props.status == 'loading') {
-      g_start = new Date().getTime();
-      wptSendEvent('navigate', '');
-    } else if (props.status == 'complete') {
-      wptSendEvent('complete', '');
-    }
-  }
-});
-
 chrome.webRequest.onErrorOccurred.addListener(function(details) {
-    if (g_active) {
+  // Chrome canary is generating spurious net:ERR_ABORTED errors
+  // right when navigation starts - we need to ignore them
+  if (g_active && 
+      details.tabId == g_tabid && 
+      details.error != "net::ERR_ABORTED") {
       var error_code =
           wpt.chromeExtensionUtils.netErrorStringToWptCode(details.error);
       wpt.LOG.info(details.error + ' = ' + error_code);
       g_active = false;
+      wpt.chromeDebugger.SetActive(g_active);
       wptSendEvent('navigate_error?error=' + error_code +
                    '&str=' + encodeURIComponent(details.error), '');
     }
@@ -293,10 +286,11 @@ chrome.webRequest.onErrorOccurred.addListener(function(details) {
 );
 
 chrome.webRequest.onCompleted.addListener(function(details) {
-    if (g_active) {
+    if (g_active && details.tabId == g_tabid) {
       wpt.LOG.info('Completed, status = ' + details.statusCode);
       if (details.statusCode >= 400) {
         g_active = false;
+        wpt.chromeDebugger.SetActive(g_active);
         wptSendEvent('navigate_error?error=' + details.statusCode, '');
       }
     }
@@ -305,7 +299,7 @@ chrome.webRequest.onCompleted.addListener(function(details) {
 
 chrome.webRequest.onBeforeRequest.addListener(function(details) {
     var action = {};
-    if (g_active) {
+    if (g_active && details.tabId == g_tabid) {
       var urlParts = details.url.match(URL_REGEX);
       var scheme = urlParts[1].toString();
       var host = urlParts[2].toString();
@@ -326,7 +320,7 @@ chrome.webRequest.onBeforeRequest.addListener(function(details) {
 
 chrome.webRequest.onBeforeSendHeaders.addListener(function(details) {
     var response = {};
-    if (g_active) {
+    if (g_active && details.tabId == g_tabid) {
       var host = details.url.match(URL_REGEX)[2].toString();
       for (originalHost in g_overrideHosts) {
         if (g_overrideHosts[originalHost] == host) {
@@ -360,11 +354,14 @@ chrome.extension.onRequest.addListener(
           '?load_time=' + time);
     }
     else if (request.message == 'wptLoad') {
-      wptSendEvent('load', '');
+      wptSendEvent('load', 
+                   '?timestamp=' + request['timestamp'] + 
+                   '&fixedViewport=' + request['fixedViewport']);
     }
     else if (request.message == 'wptWindowTiming') {
       wpt.logging.closeWindowIfOpen();
       g_active = false;
+      wpt.chromeDebugger.SetActive(g_active);
       wptSendEvent(
           'window_timing',
           '?domContentLoadedEventStart=' +
@@ -372,7 +369,30 @@ chrome.extension.onRequest.addListener(
           '&domContentLoadedEventEnd=' +
               request['domContentLoadedEventEnd'] +
           '&loadEventStart=' + request['loadEventStart'] +
-          '&loadEventEnd=' + request['loadEventEnd']);
+          '&loadEventEnd=' + request['loadEventEnd'] +
+          '&msFirstPaint=' + request['msFirstPaint']);
+    }
+    else if (request.message == 'wptDomCount') {
+      wptSendEvent('domCount', 
+                   '?domCount=' + request['domCount']);
+    }
+    else if (request.message == 'wptMarks') {
+      if (request['marks'] != undefined &&
+          request.marks.length) {
+        for (var i = 0; i < request.marks.length; i++) {
+          var mark = request.marks[i];
+          mark.type = 'mark';
+          wptSendEvent('timed_event', '', JSON.stringify(mark));
+        }
+      }
+    } else if (request.message == 'wptStats') {
+      var stats = '?';
+      if (request['domCount'] != undefined)
+        stats += 'domCount=' + request['domCount'];
+      wptSendEvent('stats', stats);
+    } else if (request.message == 'wptResponsive') {
+      if (request['isResponsive'] != undefined)
+        wptSendEvent('responsive', '?isResponsive=' + request['isResponsive']);
     }
     // TODO: check whether calling sendResponse blocks in the content script
     // side in page.
@@ -382,24 +402,33 @@ chrome.extension.onRequest.addListener(
 /***********************************************************
                       Script Commands
 ***********************************************************/
+var wptTaskCallback = function() {
+  g_processing_task = false;
+  if (!g_active)
+    window.setTimeout(wptGetTask, TASK_INTERVAL_SHORT);
+}
 
 // execute a single task/script command
 function wptExecuteTask(task) {
   if (task.action.length) {
-    if (task.record)
+    if (task.record) {
       g_active = true;
-    else
+      wpt.chromeDebugger.SetActive(g_active);
+    } else {
       g_active = false;
-
+      wpt.chromeDebugger.SetActive(g_active);
+    }
     // Decode and execute the actual command.
     // Commands are all lowercase at this point.
     wpt.LOG.info('Running task ' + task.action + ' ' + task.target);
     switch (task.action) {
       case 'navigate':
-        g_commandRunner.doNavigate(task.target);
+        g_processing_task = true;
+        g_commandRunner.doNavigate(task.target, wptTaskCallback);
         break;
       case 'exec':
-        g_commandRunner.doExec(task.target);
+        g_processing_task = true;
+        g_commandRunner.doExec(task.target, wptTaskCallback);
         break;
       case 'setcookie':
         g_commandRunner.doSetCookie(task.target, task.value);
@@ -414,25 +443,36 @@ function wptExecuteTask(task) {
         wpt.commands.g_domElements.push(task.target);
         break;
       case 'click':
-        g_commandRunner.doClick(task.target);
+        g_processing_task = true;
+        g_commandRunner.doClick(task.target, wptTaskCallback);
         break;
       case 'setinnerhtml':
-        g_commandRunner.doSetInnerHTML(task.target, task.value);
+        g_processing_task = true;
+        g_commandRunner.doSetInnerHTML(task.target, task.value, wptTaskCallback);
         break;
       case 'setinnertext':
-        g_commandRunner.doSetInnerText(task.target, task.value);
+        g_processing_task = true;
+        g_commandRunner.doSetInnerText(task.target, task.value, wptTaskCallback);
         break;
       case 'setvalue':
-        g_commandRunner.doSetValue(task.target, task.value);
+        g_processing_task = true;
+        g_commandRunner.doSetValue(task.target, task.value, wptTaskCallback);
         break;
       case 'submitform':
-        g_commandRunner.doSubmitForm(task.target);
+        g_processing_task = true;
+        g_commandRunner.doSubmitForm(task.target, wptTaskCallback);
         break;
       case 'clearcache':
-        g_commandRunner.doClearCache(task.target);
+        g_processing_task = true;
+        g_commandRunner.doClearCache(task.target, wptTaskCallback);
         break;
       case 'capturetimeline':
-        wpt.chromeDebugger.CaptureTimeline();
+        g_processing_task = true;
+        wpt.chromeDebugger.CaptureTimeline(wptTaskCallback);
+        break;
+      case 'capturetrace':
+        g_processing_task = true;
+        wpt.chromeDebugger.CaptureTrace(wptTaskCallback);
         break;
       case 'noscript':
         g_commandRunner.doNoScript();
@@ -440,16 +480,40 @@ function wptExecuteTask(task) {
       case 'overridehost':
         g_overrideHosts[task.target] = task.value;
         break;
+      case 'collectstats':
+        g_processing_task = true;
+        g_commandRunner.doCollectStats(wptTaskCallback);
+        break;
+      case 'checkresponsive':
+        g_processing_task = true;
+        g_commandRunner.doCheckResponsive(wptTaskCallback);
+        break;
 
       default:
         wpt.LOG.error('Unimplemented command: ', task);
     }
 
-    if (!g_active)
+    if (!g_active && !g_processing_task)
       window.setTimeout(wptGetTask, TASK_INTERVAL_SHORT);
   }
 }
 
-wpt.main.onStartup();
+// start out by grabbing the main tab and forcing a navigation to
+// the local blank page so we are guaranteed to see the navigation
+// event
+var queryForFocusedTab = {
+'active': true,
+'windowId': chrome.windows.WINDOW_ID_CURRENT
+};
+chrome.tabs.query(queryForFocusedTab, function(focusedTabs) {
+  // Use the first one even if the length is not the expected value.
+  var tab = focusedTabs[0];
+  g_tabid = tab.id;
+  wpt.LOG.info('Got tab id: ' + tab.id);
+  g_commandRunner = new wpt.commands.CommandRunner(g_tabid, window.chrome);
+  wpt.chromeDebugger.Init(g_tabid, window.chrome, function(){
+    setTimeout(function(){g_starting = true;chrome.tabs.update(g_tabid, {'url': STARTUP_URL});}, STARTUP_DELAY);
+  });
+});
 
 })());  // namespace

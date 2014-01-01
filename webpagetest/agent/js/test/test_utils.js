@@ -26,26 +26,38 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
 
+var assert = require('assert');
+var child_process = require('child_process');
+var events = require('events');
+var http = require('http');
 var logger = require('logger');
-var sinon = require('sinon');
+var net = require('net');
+var should = require('should');
+var Stream = require('stream');
 var timers = require('timers');
+var util = require('util');
+var webdriver = require('selenium-webdriver');
 
 
 /**
  * failTest asserts a failure with a description
  *
- * @param {String} desc is the error message that will be thrown.
+ * @param {string} desc is the error message that will be thrown.
  */
 exports.failTest = function(desc) {
   'use strict';
-  function throwError () {
+  function throwError() {
     throw new Error(desc);
   }
-  throwError.should.not.throw();
+  throwError.should.not.throwError();
 };
 
 /**
  * Generic timer function fake for use in fakeTimers.
+ * @param {sinon.sandbox} sandbox
+ * @param {string} method
+ * @param {Array} args
+ * @return {Object} a SinonJS stub.
  */
 var fakeTimerFunction = function(sandbox, method, args) {
   'use strict';
@@ -55,7 +67,8 @@ var fakeTimerFunction = function(sandbox, method, args) {
 
 // Timer functions to fake/unfake
 var fakeTimerFunctions = [
-  'setTimeout', 'clearTimeout', 'setInverval', 'clearInterval'];
+  'setTimeout', 'clearTimeout', 'setInverval', 'clearInterval'
+];
 
 /**
  * Makes the sandbox use fake timers and replaces them in the 'timers' module.
@@ -81,12 +94,12 @@ exports.fakeTimers = function(sandbox) {
   sandbox.useFakeTimers();
   fakeTimerFunctions.forEach(function(method) {
     sandbox.origTimerFunctions[method] = timers[method];
-    timers[method] = function () {
+    timers[method] = function() {
       return fakeTimerFunction(sandbox, method, arguments);
     };
   });
   // For some reason the faked functions don't actually get called without this:
-  timers.setInterval = function () {
+  timers.setInterval = function() {
     return fakeTimerFunction(sandbox, 'setInterval', arguments);
   };
 };
@@ -107,4 +120,358 @@ exports.unfakeTimers = function(sandbox) {
     // The Sinon fake_timers add it, and it trips Mocha global leak detection.
     delete global.timeouts;
   }
+};
+
+/**
+ * Ticks the fake timer until the app is IDLE.
+ *
+ * @param {webdriver.promise.ControlFlow} app the scheduler.
+ * @param {!sinon.sandbox} sandbox a SinonJS sandbox used by the test.
+ * @param {number=} maxSteps maximum number of steps to advance until we
+ *   throw an error, defaults to 100 steps.
+ * @param {number=} ticksPerStep number of ticks to advance per step,
+ *   defaults to {webdriver.promise.ControlFlow.EVENT_LOOP_FREQUENCY} ticks.
+ */
+exports.tickUntilIdle = function(app, sandbox, maxSteps, ticksPerStep) {
+  'use strict';
+  if ('[]' === app.getSchedule()) {
+    return; // Already idle
+  }
+  maxSteps = (undefined !== maxSteps ? maxSteps : 100);
+  ticksPerStep = (undefined !== ticksPerStep ? ticksPerStep :
+      webdriver.promise.ControlFlow.EVENT_LOOP_FREQUENCY);
+  var isIdle = false;
+  function onIdle() { isIdle = true; }
+  app.on(webdriver.promise.ControlFlow.EventType.IDLE, onIdle);
+  var steps = 0;
+  while (!isIdle && steps++ < maxSteps) {
+    sandbox.clock.tick(ticksPerStep);
+  }
+  app.removeListener(webdriver.promise.ControlFlow.EventType.IDLE, onIdle);
+  should.ok(steps < maxSteps, 'ControlFlow still active after ' + steps + '*' +
+      ticksPerStep + ' ticks');
+  should.equal('[]', app.getSchedule());
+};
+
+/**
+ * Stubs out logger.log for all isMatch calls to log 'stubLog.E(msg...)'.
+ *
+ * @param {Object} sandbox Sinon.JS sandbox object.
+ * @param {Function} isMatch called before every logger.log call that passes the
+ *   LOG_TO_CONSOLE and MAX_LOG_LEVEL tests, return true to supress the
+ *   standard logger.
+ * @return {Object} a SinonJS stub.
+ */
+exports.stubLog = function(sandbox, isMatch) {
+  'use strict';
+  var originalLog = logger.log;
+  return sandbox.stub(logger, 'log', function() {
+    if (isMatch.apply(undefined, arguments)) {
+      var args = Array.prototype.slice.call(arguments);
+      var msg = (args[4] || '').split('\n')[0].slice(0, 12) + '...';
+      originalLog.apply(undefined, [args[0], '', '',
+          '    stubLog.' + args[1] + '(' + msg + ')', '']);
+    } else {
+      originalLog.apply(undefined, arguments);
+    }
+  });
+};
+
+/**
+ * Stubs out http.get() to verify the URL and return specific content.
+ *
+ * @param {Object} sandbox Sinon.JS sandbox object.
+ * @param {RegExp=} urlRegExp what the URL should be, or undefined.
+ * @param {string} data the content to return.
+ * @return {Object} a SinonJS stub.
+ */
+exports.stubHttpGet = function(sandbox, urlRegExp, data) {
+  'use strict';
+  var response = new Stream();
+  response.setEncoding = function() {};
+  return sandbox.stub(http, 'get', function(url, responseCb) {
+    logger.debug('Stub http.get(%s)', url.href);
+    if (urlRegExp) {
+      url.href.should.match(urlRegExp);
+    }
+    responseCb(response);
+    response.emit('data', data);
+    response.emit('end');
+    return response;
+  });
+};
+
+/**
+ * Asserts that the expected array matches the actual array.
+ * @param {Array} expected can contain strings and/or RegExp's.
+ * @param {Array} actual only contains strings.
+ */
+exports.assertStringsMatch = function(expected, actual) {
+  'use strict';
+  if (!actual || expected.length !== actual.length) {
+    assert.fail(actual, expected,
+        util.format('%j does not match %j', actual, expected));
+  } else {
+    expected.forEach(function(expValue, i) {
+      var matches = expValue instanceof RegExp ?
+          expValue.test(actual[i]) :
+          expValue === actual[i];
+      if (!matches) {
+        assert.fail(actual[i], expValue,
+            util.format('element #%d of %j does not match %j',
+                i, actual, expected));
+      }
+    });
+  }
+};
+
+/**
+ * A generalized assertStringsMatch that adds support for non-Array "expected"
+ * values.
+ *
+ * @param {Object} expected can contain strings and/or RegExp's.
+ *   If expected is an Array, we call assertStringsMatch.
+ *   If expected is a function, we apply it with actual.  The function is
+ *     responsible for asserting the actual items.
+ *   If expected is an object, we assert the items at the key indices, where
+ *     negative keys are relative to actual.length, e.g.:
+ *     {0:'ssh', '-1':/ls$/}.
+ * @param {Array} actual only contains strings, e.g.:
+ *   ['ssh', 'foo.com', 'ls'].
+ * @see assertStringsMatch
+ */
+exports.assertMatch = function(expected, actual) {
+  'use strict';
+  if (!expected || (expected instanceof Array)) {
+    exports.assertStringsMatch(expected, actual);
+  } else if ('function' === typeof expected) {
+    expected.apply(expected, actual);
+  } else {
+    Object.getOwnPropertyNames(expected).forEach(function(name) {
+      var expValue = expected[name];
+      var index = name;
+      if (index < 0) {
+        index = actual.length + parseInt(index, 10);
+      }
+      var actValue =
+          (index >= 0 && index < actual.length ? actual[index] : undefined);
+      var matches = expValue instanceof RegExp ?
+          expValue.test(actValue) :
+          expValue === actValue;
+      if (!matches) {
+        assert.fail(actValue, expValue,
+            util.format('element #%d of [%s] does not match [%s]',
+                name, actual, expected));
+      }
+    });
+  }
+};
+
+/**
+ * Stubs out child_process.spawn, allows a callback to inject behavior and
+ * tests to assert expected calls.
+ *
+ * The returned stub's "callback" property can be set to control child process
+ * stdout and close/exit.  The API is:
+ *   #param {Process} proc the fake process.
+ *   #param {String} command
+ *   #param {Array} args
+ *   #return {boolean} false (the default) to emit a 'close' and 'exit' after
+ *     5 (fake) milliseconds.  If true then callback is responsible for emitting
+ *     these events.
+ *
+ * The returned stub supports "assertCall":
+ *   Asserts the expected next call and increments the callNum.
+ *   #param {Object} var_args expected args for assertMatch, e.g.:
+ *     assertCall('foo', /x$/);
+ *     assertCall({'-1':'bar'});
+ * If the var_args is empty then the stub asserts that there are no more calls,
+ * otherwise assertMatch is used to compare the actual vs expected args.
+ *
+ * To assert a list of calls, use "assertCalls":
+ *   Asserts the expected next N calls and increments the callNum by N.
+ *   #param {Object} zero or more assertCall args, e.g.:
+ *     assertCalls(['foo', /x$/], {'-1':'bar']);
+ *
+ * @param {Object} sandbox a SinonJS sandbox object.
+ * @return {Object} a SinonJS stub.
+ */
+exports.stubOutProcessSpawn = function(sandbox) {
+  'use strict';
+  var stub = sandbox.stub(child_process, 'spawn', function() {
+    var fakeProcess = new events.EventEmitter();
+    fakeProcess.stdout = new events.EventEmitter();
+    fakeProcess.stderr = new events.EventEmitter();
+    fakeProcess.kill = sandbox.spy();
+    var args = Array.prototype.slice.call(arguments);
+    var keepAlive = false;
+    if (stub.callback) {
+      args.unshift(fakeProcess);
+      keepAlive = stub.callback.apply(undefined, args);
+    }
+    if (!keepAlive) {
+      global.setTimeout(function() {
+        ['exit', 'close'].forEach(function(evt) {
+          fakeProcess.emit(evt, /*code=*/0, /*signal=*/undefined);
+        });
+      }, 5);
+    }
+    return fakeProcess;
+  });
+  stub.callback = undefined;
+
+  stub.callNum = 0;
+  stub.assertCall = function() {
+    var argv;
+    var expected = Array.prototype.slice.call(arguments);
+    if (0 === expected.length) {  // Called with no args: assert no more calls.
+      if (this.callNum < this.callCount) {
+        argv = this.getCall(this.callNum).args;
+        assert.fail(undefined, expected, this.printf(
+            'Unexpected actual call #%1 to %n(): %2',
+            this.callNum, [argv[0]].concat(argv[1])));
+      } else {
+        should.equal(this.callNum, this.callCount);
+      }
+      return;
+    }
+    if (1 === expected.length && !(expected[0] instanceof Array)) {
+      expected = expected[0];
+    }
+    if (this.callNum >= this.callCount) {
+      assert.fail(undefined, expected, this.printf(
+          'Missing expected call #%1 to %n(): %2',
+          this.callCount + 1, JSON.stringify(expected)));
+    }
+    argv = this.getCall(this.callNum).args;
+    this.callNum += 1;
+    exports.assertMatch(expected, [argv[0]].concat(argv[1]));
+  };
+
+  stub.assertCalls = function() {
+    var i;
+    for (i = 0; i < arguments.length; i += 1) {
+      var expected = arguments[i];
+      if (!(expected instanceof Array)) {
+        expected = [expected];
+      }
+      this.assertCall.apply(this, expected);
+    }
+  };
+
+  return stub;
+};
+
+/**
+ * Creates a spawnStub.callback that can handle basic 'ps' and 'kill' requests.
+ *
+ * @return {Object} a callback with 'callback(proc, command, args)' and
+ *    'addKeepAlive(proc)' functions.
+ */
+exports.stubShell = function() {
+  'use strict';
+  var ret = {};
+  var pidToProc = [];
+  var nextPid = 2;
+  ret.addKeepAlive = function(proc) {
+    should.equal(undefined, proc.pid);
+    var pid = nextPid++;
+    proc.pid = pid;
+    pidToProc[pid] = proc;
+    proc.on('exit', function() {
+      delete pidToProc[pid];
+    });
+    return pid;
+  };
+  ret.ps_ = function(args) {
+    exports.assertMatch(['-u', /^\d+$/, '-o', 'ppid=', '-o', 'pid=', '-o',
+        'command='], args);
+    return Object.keys(pidToProc).map(function(pid) {
+          return '1 ' + pid + ' cmd';
+        }).join('\n');
+  };
+  ret.kill_ = function(args) {
+    exports.assertMatch(['-9', /^\d+$/], args);
+    var pid = args[args.length - 1];
+    var proc = pidToProc[pid];
+    if (undefined !== proc) {
+      delete pidToProc[pid];
+      proc.kill();
+    }
+  };
+  ret.callback = function(proc, command, args) {
+    if ('ps' === command) {
+      var stdout = ret.ps_(args);
+      if (!!stdout) {
+        global.setTimeout(function() {
+          proc.stdout.emit('data', stdout);
+        }, 1);
+      }
+    } else if ('kill' === command) {
+      ret.kill_(args);
+    } else {
+      throw new Error(util.format('Unexpected command: %s %j', command, args));
+    }
+    return false;
+  };
+  return ret;
+};
+
+/**
+ * Stubs out Math.random with a fixed seed.
+ *
+ * @param {Object} sandbox a SinonJS sandbox object.
+ * @param {Object=} seed optional seed, defaults to 0.1234.
+ * @return {Object} a SinonJS stub.
+ */
+exports.stubRandom = function(sandbox, seed) {
+  'use strict';
+  var nextRandom = (seed || 0.1234);
+  return sandbox.stub(Math, 'random', function() {
+    var ret = nextRandom;
+    nextRandom = (31 * ret) % 1;
+    return ret;
+  });
+};
+
+/**
+ * Stubs out net.createServer, fakes a listener socket that can bind any port
+ * but never accepts clients.
+ *
+ * @param {Object} sandbox a SinonJS sandbox object.
+ * @param {Object=} mod require'd module, e.g. net or http.  Defaults to net.
+ * @return {Object} a SinonJS stub.
+ * @see stubRandom process_utils.scheduleAllocatePort uses Math.random().
+ */
+exports.stubCreateServer = function(sandbox, mod) {
+  'use strict';
+  var stub = sandbox.stub(mod || net, 'createServer', function() {
+    var fakeServer = new events.EventEmitter();
+    fakeServer.port = undefined;
+    fakeServer.listen = function(port, callback) {
+      assert(!this.port, 'port already set');
+      if (1 === stub.ports[port]) {
+        this.emit('error', new Error('port in use'));
+        return;
+      }
+      this.port = port;
+      stub.ports[port] = 1;
+      if (callback) {
+        callback();
+      }
+    };
+    fakeServer.close = function(callback) {
+      var port = this.port;
+      assert(port, 'port not set');
+      assert(1 === stub.ports[port], 'port not in use');
+      this.port = undefined;
+      stub.ports[port] = -1;
+      if (callback) {
+        callback();
+      }
+    };
+    return fakeServer;
+  });
+  stub.ports = {};
+  return stub;
 };

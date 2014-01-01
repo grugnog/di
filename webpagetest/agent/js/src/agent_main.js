@@ -25,138 +25,62 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
-/*jslint nomen:false */
 
 var child_process = require('child_process');
-var devtools2har = require('devtools2har');
 var fs = require('fs');
 var logger = require('logger');
 var nopt = require('nopt');
+var path = require('path');
 var process_utils = require('process_utils');
 var system_commands = require('system_commands');
-var webdriver = require('webdriver');
+var traffic_shaper = require('traffic_shaper');
+var webdriver = require('selenium-webdriver');
 var wpt_client = require('wpt_client');
-var Zip = require('node-zip');
 
-var flagDefs = {
-  knownOpts: {
-    wpt_server: [String, null],
-    location: [String, null],
-    java: [String, null],
-    seleniumJar: [String, null],
-    chrome: [String, null],
-    chromedriver: [String, null],
-    devtools2harJar: [String, null],
-    job_timeout: [Number, null],
-    api_key: [String, null]
-  },
-  shortHands: {}
+/**
+ * Partial list of expected command-line options.
+ *
+ * @see wd_server init defines additional command-line args, e.g.:
+ *     browser: [String, null],
+ *     chromedriver: [String, null],
+ *     ..
+ */
+var knownOpts = {
+  serverUrl: [String, null],
+  location: [String, null],
+  deviceAddr: [String, null],
+  deviceSerial: [String, null],
+  jobTimeout: [Number, null],
+  apiKey: [String, null]
 };
 
 var WD_SERVER_EXIT_TIMEOUT = 5000;  // Wait for 5 seconds before force-killing
-var HAR_FILE_ = './results.har';
-var DEVTOOLS_EVENTS_FILE_ = './devtools_events.json';
-var IPFW_FLUSH_FILE_ = 'ipfw_flush.sh';
-
-exports.seleniumJar = undefined;
-exports.chromedriver = undefined;
-
 
 /**
- * Deletes temporary files used during a test.
+ * @param {wpt_client.Client} client the WebPagetest client.
+ * @param {Object} flags from knownOpts.
+ * @constructor
  */
-function deleteHarTempFiles(callback) {
-  'use strict';
-  var files = [DEVTOOLS_EVENTS_FILE_, HAR_FILE_];
-  function unlink (prevFile, prevError) {
-    if (prevError && !(prevError.code && 'ENOENT' === prevError.code)) {
-      // There is an error other than 'file not found'
-      logger.error('Unlink error for %s: %s', prevFile, prevError);
-    }
-    var nextFile = files.pop();
-    if (nextFile) {
-      fs.unlink(nextFile, unlink.bind(undefined, nextFile));
-    } else if (callback) {
-      if (prevError && !(prevError.code && 'ENOENT' === prevError.code)) {
-        // There is an error other than 'file not found'
-        callback(prevError);
-      } else {
-        callback();
-      }
-    }
-  }
-  unlink();
-}
-
-/**
- * Takes devtools messages and creates an appropriate file body that it passes
- * to harCallback
- *
- * @param {Object[]} devToolsMessages an array of the developer tools messages.
- * @param {String} [pageId] the page ID string for (the only page) in the HAR.
- * @param {String} [browserName] browser name for the HAR.
- * @param {String} [browserVersion] browser version for the HAR.
- * @param {Function(String)} harCallback the callback to call upon completion:
- *     #param {String} harContent HAR content.
- *     #param {Error} [e] exception, if any.
- */
-function convertDevToolsToHar(
-    devToolsMessages, pageId, browserName, browserVersion, harCallback) {
-  'use strict';
-  deleteHarTempFiles(function(e) {
-    if (e) {
-      harCallback('', e);
-    } else {
-      fs.writeFile(
-          DEVTOOLS_EVENTS_FILE_, JSON.stringify(devToolsMessages), 'UTF-8',
-          function(e) {
-        if (e) {
-          harCallback('', e);
-        } else {
-          devtools2har.devToolsToHar(
-              DEVTOOLS_EVENTS_FILE_, HAR_FILE_,
-              pageId, browserName, browserVersion, function(e) {
-            if (e) {
-              deleteHarTempFiles(harCallback.bind(undefined, '', e));
-            } else {
-              fs.readFile(HAR_FILE_, 'UTF-8', function(e, data) {
-                if (e) {
-                  logger.error('Error reading results.har: %s', e);
-                  deleteHarTempFiles(harCallback.bind(undefined, data, e));
-                } else {
-                  deleteHarTempFiles(harCallback.bind(undefined, data));
-                }
-              });
-            }
-          });
-        }
-      });
-    }
-  });
-}
-
-/**
- * Used as an errback for when we want to drop the error without logging.
- *
- * The underlying action has already logged the error, we only want to
- * prevent it from propagating up the promise manager stack.
- */
-function swallowError() {
-  'use strict';
-}
-
 function Agent(client, flags) {
   'use strict';
-
   this.client_ = client;
   this.flags_ = flags;
-  this.app_ = webdriver.promise.Application.getInstance();
-  process_utils.injectWdAppLogging('main app', this.app_);
+  this.app_ = webdriver.promise.controlFlow();
+  process_utils.injectWdAppLogging('agent_main', this.app_);
+  // The directory to store run result files. Clean it up before+after each run.
+  // We want a fixed name, to avoid leaving junk after agent crashes/restarts.
+  var runTempSuffix = flags.deviceSerial || '';
+  if (!/^[a-z0-9]*$/i.test(runTempSuffix)) {
+    throw new Error('--deviceSerial may contain only letters and digits');
+  }
+  this.runTempDir_ = 'runtmp' + (runTempSuffix ? '_' + runTempSuffix : '');
   this.wdServer_ = undefined;  // The wd_server child process.
+  this.trafficShaper_ = new traffic_shaper.TrafficShaper(this.app_, flags);
 
   this.client_.onStartJobRun = this.startJobRun_.bind(this);
-  this.client_.onJobTimeout = this.jobTimeout_.bind(this);
+  this.client_.onAbortJob = this.abortJob_.bind(this);
 }
+/** Public class. */
 exports.Agent = Agent;
 
 /**
@@ -167,135 +91,107 @@ Agent.prototype.run = function() {
   this.client_.run(/*forever=*/true);
 };
 
+/**
+ * @param {string=} description debug title.
+ * @param {Function} f the function to schedule.
+ * @return {webdriver.promise.Promise} the scheduled promise.
+ * @private
+ */
 Agent.prototype.scheduleNoFault_ = function(description, f) {
   'use strict';
   return process_utils.scheduleNoFault(this.app_, description, f);
 };
 
-/** flusIpfw runs the flush script used when setting or resetting ipfw */
-Agent.prototype.scheduleIpfwReset_ = function() {
-  'use strict';
-  return process_utils.scheduleExec(
-      system_commands.get('run', [IPFW_FLUSH_FILE_])).addErrback(swallowError);
-};
-
 /**
- * Starts traffic shaping.
- *
- * @param {Number} bwIn input bandwidth throttling.
- * @param {Number} bwOut output bandwidth throttling.
- * @param {Number} latency induces fixed round trip latency.
+ * Starts a child process with the wd_server module.
+ * @param {Job} job the job for which we are starting the server process.
+ * @private
  */
-Agent.prototype.scheduleIpfwStart_ = function(bwIn, bwOut, latency) {
-  'use strict';
-  logger.info('Starting traffic shaping');
-  var pipeInArgs = '';
-  var pipeOutArgs = '';
-  if (bwIn) {
-    pipeInArgs += ' bw ' + bwIn + 'Kbit/s';
-  }
-  if (bwOut) {
-    pipeOutArgs += ' bw ' + bwOut + 'Kbit/s';
-  }
-
-  if (latency) {
-    var latencyIn = Math.floor(latency / 2);
-    // if the latency is odd, add 1 to latencyOut to ensure they sum to latency.
-    var latencyOut = (0 === latency % 2) ? latencyIn : latencyIn + 1;
-    pipeInArgs += ' delay ' + latencyIn  + 'ms';
-    pipeOutArgs += ' delay ' + latencyOut  + 'ms';
-  }
-
-  this.scheduleIpfwReset_();
-  if (pipeInArgs) {
-    var pipeInCommand = 'ipfw pipe 1 config ' + pipeInArgs;
-    process_utils.scheduleExec(pipeInCommand).addErrback(swallowError);
-  }
-  if (pipeInArgs) {
-    var pipeOutCommand = 'ipfw pipe 2 config ' + pipeOutArgs;
-    process_utils.scheduleExec(pipeOutCommand).addErrback(swallowError);
-  }
-};
-
-Agent.prototype.startWdServer_ = function() {
+Agent.prototype.startWdServer_ = function(job) {
   'use strict';
   this.wdServer_ = child_process.fork('./src/wd_server.js',
       [], {env: process.env});
-  this.wdServer_.on('exit', function() {
+  this.wdServer_.on('message', function(ipcMsg) {
+    logger.debug('got IPC: %s', ipcMsg.cmd);
+    if ('done' === ipcMsg.cmd || 'error' === ipcMsg.cmd) {
+      var isRunFinished = job.isFirstViewOnly || job.isCacheWarm;
+      if ('error' === ipcMsg.cmd) {
+        job.error = ipcMsg.e;
+        // Error in a first-view run: can't do a repeat run.
+        isRunFinished = true;
+      }
+      this.scheduleProcessDone_(ipcMsg, job);
+      if (isRunFinished) {
+        this.scheduleCleanup_();
+      }
+      // Do this only at the very end, as it starts a new run of the job.
+      this.scheduleNoFault_('Job finished',
+          job.runFinished.bind(job, isRunFinished));
+    }
+  }.bind(this));
+  this.wdServer_.on('exit', function(code, signal) {
+    logger.info('wd_server child process exit code %s signal %s', code, signal);
     this.wdServer_ = undefined;
   }.bind(this));
 };
 
+/**
+ * Processes job results, including failed jobs.
+ *
+ * @param {Object} ipcMsg a message from the wpt client.
+ * @param {Job} job the job with results.
+ * @private
+ */
 Agent.prototype.scheduleProcessDone_ = function(ipcMsg, job) {
   'use strict';
-  var done = new webdriver.promise.Deferred();
-  var zip = new Zip();
-  if (ipcMsg.devToolsTimelineMessages) {
-    var timelineJson = JSON.stringify(ipcMsg.devToolsTimelineMessages);
-    zip.file(job.runNumber + '_timeline.json', timelineJson);
-  }
-  if (ipcMsg.screenshots && ipcMsg.screenshots.length > 0) {
-    var imageDescriptors = [];
-    ipcMsg.screenshots.forEach(function(screenshot) {
-      logger.debug('Adding screenshot %s', screenshot.fileName);
-      var contentBuffer = new Buffer(screenshot.base64, 'base64');
-      job.resultFiles.push(new wpt_client.ResultFile(
-          wpt_client.ResultFile.ResultType.IMAGE,
-          screenshot.fileName,
-          screenshot.contentType,
-          contentBuffer));
-      if (screenshot.description) {
-        imageDescriptors.push({
-            filename: screenshot.fileName,
-            description: screenshot.description
-        });
-      }
-      if (logger.isLogging('debug')) {
-        logger.debug('Writing a local copy of %s (%s)',
-            screenshot.fileName, screenshot.description);
-        // Don't pass a callback, we don't care when it finishes or fails.
-        fs.writeFile(screenshot.fileName, contentBuffer);
-      }
-    });
-    if (imageDescriptors.length > 0) {
-      zip.file(
-          job.runNumber + '_images.json', JSON.stringify(imageDescriptors));
-    }
-  }
-  if (Object.keys(zip.files).length > 0) {
-    job.resultFiles.push(new wpt_client.ResultFile(
-        wpt_client.ResultFile.ResultType.TIMELINE,
-        job.runNumber + '_results.zip',
-        'application/zip',
-        new Buffer(zip.generate({compression:'DEFLATE'}), 'base64')));
-  }
-  if (ipcMsg.devToolsMessages) {
-    convertDevToolsToHar(
-        ipcMsg.devToolsMessages,
-        'page_' + job.runNumber + '_0',
-        job.task.browser,
-        /*browserVersion=*/undefined,
-        function(harContent, e) {
-      if (e) {
-        done.reject(e);
-      } else if (harContent) {
-        job.resultFiles.push(new wpt_client.ResultFile(
-            wpt_client.ResultFile.ResultType.HAR,
-            job.runNumber + '_results.har',
-            'application/json',
-            harContent));
-        done.resolve(job);
-      } else {
-        logger.error('HAR content empty even though devtools2har succeeded');
-        done.resolve();
-      }
-    });
-  } else {
-    done.resolve();
-  }
   this.scheduleNoFault_('Process job results', function() {
-    return done.promise;
-  });
+    if (ipcMsg.devToolsMessages) {
+      job.zipResultFiles['devtools.json'] =
+          JSON.stringify(ipcMsg.devToolsMessages);
+    }
+    if (ipcMsg.screenshots && ipcMsg.screenshots.length > 0) {
+      var imageDescriptors = [];
+      ipcMsg.screenshots.forEach(function(screenshot) {
+        logger.debug('Adding screenshot %s', screenshot.fileName);
+        process_utils.scheduleFunctionNoFault(this.app_,
+            'Read ' + screenshot.diskPath,
+            fs.readFile, screenshot.diskPath).then(function(buffer) {
+          job.resultFiles.push(new wpt_client.ResultFile(
+              wpt_client.ResultFile.ResultType.IMAGE,
+              screenshot.fileName,
+              screenshot.contentType,
+              buffer));
+          if (screenshot.description) {
+            imageDescriptors.push({
+              filename: screenshot.fileName,
+              description: screenshot.description
+            });
+          }
+        }.bind(this));
+      }.bind(this));
+      if (imageDescriptors.length > 0) {
+        job.zipResultFiles['images.json'] = JSON.stringify(imageDescriptors);
+      }
+    }
+    if (ipcMsg.videoFile) {
+      process_utils.scheduleFunctionNoFault(this.app_, 'Read video file',
+          fs.readFile, ipcMsg.videoFile).then(function(buffer) {
+        job.resultFiles.push(new wpt_client.ResultFile(
+            wpt_client.ResultFile.ResultType.IMAGE,
+            'video.avi', 'video/avi', buffer));
+      }.bind(this));
+    }
+    if (ipcMsg.pcapFile) {
+      process_utils.scheduleFunctionNoFault(this.app_, 'Read pcap file',
+              fs.readFile, ipcMsg.pcapFile).then(function(buffer) {
+        job.resultFiles.push(new wpt_client.ResultFile(
+            wpt_client.ResultFile.ResultType.PCAP,
+            '.cap', 'application/vnd.tcpdump.pcap', buffer));
+      });
+      process_utils.scheduleFunctionNoFault(this.app_, 'Delete pcap file',
+          fs.unlink, ipcMsg.pcapFile);
+    }
+  }.bind(this));
 };
 
 /**
@@ -304,85 +200,239 @@ Agent.prototype.scheduleProcessDone_ = function(ipcMsg, job) {
  * Must call job.runFinished() no matter how the run ended.
  *
  * @param {Job} job the job to run.
+ * @private
  */
 Agent.prototype.startJobRun_ = function(job) {
   'use strict';
-  logger.info('Running job: %s', job.id);
-  if (job.task.script) {
-    this.scheduleIpfwStart_(
-        job.task.bwIn, job.task.bwOut, job.task.latency);
-    logger.info('Running script: %s', job.task.script);
-    this.startWdServer_();
-    // is setting up the message listener after the fork a race condition?
-    // I don't see a way to set up the listener before wdServer_ inherits from
-    // eventemitter though.
-    this.wdServer_.on('message', function(ipcMsg) {
-      logger.debug('got IPC: %s', ipcMsg.cmd);
-      if ('done' === ipcMsg.cmd || 'error' === ipcMsg.cmd) {
-        if ('error' === ipcMsg.cmd) {
-          job.error = ipcMsg.e;
-        }
-        this.scheduleProcessDone_(ipcMsg, job);
-        this.scheduleCleanup_();
-        // Do this only at the very end, as it starts a new run of the job.
-        this.scheduleNoFault_('Job finished', job.runFinished.bind(job));
+  job.isCacheWarm = !!this.wdServer_;
+  logger.info('Running job %s run %d/%d cacheWarm=%s',
+      job.id, job.runNumber, job.runs, job.isCacheWarm);
+  this.scheduleCleanRunTempDir_();
+  if (!this.wdServer_) {
+    this.trafficShaper_.scheduleStart(
+        job.task.bwIn, job.task.bwOut, job.task.latency, job.task.plr);
+    this.startWdServer_(job);
+  }
+  var script = job.task.script;
+  var url = job.task.url;
+  var pac;
+  if (script && !/new\s+(\S+\.)?Builder\s*\(/.test(script)) {
+    var urlAndPac = this.decodeUrlAndPacFromScript_(script);
+    url = urlAndPac.url;
+    pac = urlAndPac.pac;
+    script = undefined;
+  }
+  url = url.trim();
+  if (!((/^https?:\/\//i).test(url))) {
+    url = 'http://' + url;
+  }
+  this.scheduleNoFault_('Send IPC "run"', function() {
+    var message = {
+        cmd: 'run',
+        options: {browserName: job.task.browser},
+        runNumber: job.runNumber,
+        exitWhenDone: job.isFirstViewOnly || job.isCacheWarm,
+        captureVideo: job.captureVideo,
+        capturePackets: job.capturePackets,
+        script: script,
+        url: url,
+        pac: pac,
+        timeout: this.client_.jobTimeout,
+        runTempDir: this.runTempDir_
+      };
+    Object.getOwnPropertyNames(this.flags_).forEach(function(flagName) {
+      if (!message[flagName]) {
+        message[flagName] = this.flags_[flagName];
       }
     }.bind(this));
-    this.wdServer_.send({
-      cmd: 'run',
-      options: {browserName: job.task.browser},
-      runNumber: job.runNumber,
-      captureVideo: job.captureVideo,
-      script: job.task.script,
-      seleniumJar: this.flags_.selenium_jar,
-      chromedriver: this.flags_.chromedriver,
-      chrome: this.flags_.chrome,
-      javaCommand: this.flags_.java
-    });
-  } else {
-    job.error = 'NodeJS agent currently only supports tasks with a script';
-    this.scheduleNoFault_('Job finished', job.runFinished.bind(job));
-  }
-};
-
-Agent.prototype.jobTimeout_ = function(job) {
-  'use strict';
-  // Immediately kill wd_server
-  if (this.wdServer_) {
-    try {
-      this.wdServer_.kill();
-    } catch (e) {
-      logger.error('wd_server kill failed: %s', e);
-    }
-    this.wdServer_ = undefined;
-  }
-  this.scheduleCleanup_();
-  this.scheduleNoFault_('Timed out job finished', job.runFinished.bind(job));
+    this.wdServer_.send(message);
+  }.bind(this));
 };
 
 /**
- * cleanupJob will try to kill the webdriver server if it has been started and
- * will call killDanglingProcesses to kill anything left over from a job.
- * The callback is a wpt_client callback, for the wpt_client.Client to continue
- * working after we process the timeout.
+ * Makes sure the run temp dir exists and is empty, but ignores deletion errors.
+ * Currently supports only flat files, no subdirectories.
+ * @private
+ */
+Agent.prototype.scheduleCleanRunTempDir_ = function() {
+  'use strict';
+  process_utils.scheduleFunctionNoFault(this.app_, 'Tmp check',
+      fs.exists, this.runTempDir_).then(function(exists) {
+    if (exists) {
+      process_utils.scheduleFunction(this.app_, 'Tmp read',
+          fs.readdir, this.runTempDir_).then(function(files) {
+        files.forEach(function(fileName) {
+          var filePath = path.join(this.runTempDir_, fileName);
+          process_utils.scheduleFunctionNoFault(this.app_, 'Delete ' + filePath,
+              fs.unlink, filePath);
+        }.bind(this));
+      }.bind(this));
+    } else {
+      process_utils.scheduleFunction(this.app_, 'Tmp create',
+          fs.mkdir, this.runTempDir_);
+    }
+  }.bind(this));
+};
+
+/**
+ * @param {string} message the error message.
+ * @constructor
+ * @see decodeUrlAndPacFromScript_
+ */
+function ScriptError(message) {
+  'use strict';
+  this.message = message;
+  this.stack = (new Error(message)).stack;
+}
+ScriptError.prototype = new Error();
+
+/**
+ * Extract the URL and PAC from a simple WPT script.
+ *
+ * We don't support general WPT scripts.  Instead, we only support the minimal
+ * subset that's required to express a PAC proxy configuration script.
+ * Here are a couple examples of supported scripts:
+ *
+ *    1)
+ *    setDnsName foo.com bar.com
+ *    navigate qux.com
+ *
+ *    2)
+ *    setDnsName foo.com ignored.com
+ *    overrideHost foo.com bar.com
+ *    navigate qux.com
+ *
+ * Blank lines and lines starting with "//" are ignored.  Lines starting with
+ * "if", "endif", and "addHeader" are also ignored for now, but this feature is
+ * deprecated and these commands will be rejected in a future.  Any other input
+ * will throw a ScriptError.
+ *
+ * @param {string} script e.g.:
+ *   setDnsName fromHost toHost
+ *   navigate url.
+ * @return {Object} a URL and PAC object, e.g.:
+ *   {url:'http://x.com', pac:'function Find...'}.
+ * @private
+ */
+Agent.prototype.decodeUrlAndPacFromScript_ = function(script) {
+  'use strict';
+  var fromHost, toHost, proxy, url;
+  script.split('\n').forEach(function(line, lineNumber) {
+    line = line.trim();
+    if (!line || 0 === line.indexOf('//')) {
+      return;
+    }
+    if (line.match(/^(if|endif|addHeader)\s/i)) {
+      return;
+    }
+    var m = line.match(/^setDnsName\s+(\S+)\s+(\S+)$/i);
+    if (m && !fromHost && !url) {
+      fromHost = m[1];
+      toHost = m[2];
+      return;
+    }
+    m = line.match(/^overrideHost\s+(\S+)\s+(\S+)$/i);
+    if (m && fromHost && m[1] === fromHost && !proxy && !url) {
+      proxy = m[2];
+      return;
+    }
+    m = line.match(/^navigate\s+(\S+)$/i);
+    if (m && fromHost && !url) {
+      url = m[1];
+      return;
+    }
+    throw new ScriptError('WPT script contains unsupported line[' +
+        lineNumber + ']: ' + line + '\n' +
+        '--- support is limited to:\n' +
+        'setDnsName H1 H2\\n [overrideHost H1 H3]\\n navigate H4');
+  });
+  if (!fromHost || !url) {
+    throw new ScriptError('WPT script lacks ' +
+        (fromHost ? 'navigate' : 'setDnsName'));
+  }
+  logger.debug('Script is a simple PAC from=%s to=%s url=%s',
+      fromHost, proxy || toHost, url);
+  return {url: url, pac: 'function FindProxyForURL(url, host) {\n' +
+      '  if ("' + fromHost + '" === host) {\n' +
+      '    return "PROXY ' + (proxy || toHost) + '";\n' +
+      '  }\n' +
+      '  return "DIRECT";\n}\n'};
+};
+
+/**
+ * @param {Object} job the job to abort (e.g. due to timeout).
+ * @private
+ */
+Agent.prototype.abortJob_ = function(job) {
+  'use strict';
+  if (this.wdServer_) {
+    this.scheduleNoFault_('Remove message listener',
+      this.wdServer_.removeAllListeners.bind(this.wdServer_, 'message'));
+    this.scheduleNoFault_('Send IPC "abort"',
+        this.wdServer_.send.bind(this.wdServer_, {cmd: 'abort'}));
+  }
+  this.scheduleCleanup_();
+  this.scheduleNoFault_('Timed out job finished',
+      job.runFinished.bind(job, /*isRunFinished=*/true));
+};
+
+/**
+ * Kill the wdServer and traffic shaper.
+ *
+ * @private
  */
 Agent.prototype.scheduleCleanup_ = function() {
   'use strict';
   if (this.wdServer_) {
-    process_utils.scheduleExitWaitOrKill(this.wdServer_, 'wd_server',
-            WD_SERVER_EXIT_TIMEOUT).addBoth(function() {
+    this.scheduleNoFault_('Remove message listener',
+      this.wdServer_.removeAllListeners.bind(this.wdServer_, 'message'));
+    process_utils.scheduleWait(this.app_, this.wdServer_, 'wd_server',
+          WD_SERVER_EXIT_TIMEOUT).then(function() {
+      // This assumes a clean exit with no zombies
       this.wdServer_ = undefined;
+    }.bind(this), function() {
+      process_utils.scheduleKillTree(this.app_, 'Kill wd_server',
+          this.wdServer_);
+      this.app_.schedule('undef wd_server', function() {
+        this.wdServer_ = undefined;
+      }.bind(this));
     }.bind(this));
   }
-  this.scheduleNoFault_('Child process cleanup', function() {
-    var danglingDone = new webdriver.promise.Deferred();
-    logger.info('Cleaning up child processes');
-    process_utils.killDanglingProcesses(function() {
-      danglingDone.resolve();
-    });
-    return danglingDone.promise;
-  });
-  this.scheduleIpfwReset_();
+  this.trafficShaper_.scheduleStop();
+  if (1 === parseInt(this.flags_.killall || '0', 10)) {
+    // Kill all processes for this user, except our own process and parent(s).
+    //
+    // This assumes that there are no extra login shells for our user,
+    // otherwise they'll all be killed!  The expected use is to create a custom
+    // user, e.g. "foo", and launch our agent via:
+    //    nohup sudo -u foo -H ./wptdriver.sh --killall 1 ... &
+    // Ideally we could run agent_main as our normal user and do this "sudo -u"
+    // when we fork wd_server, but cross-user IPC apparently doesn't work.
+    process_utils.scheduleGetAll(this.app_).then(function(processInfos) {
+      var pid = process.pid;
+      var pi; // Declare outside the loop, to avoid a jshint warning
+      while (pid) {
+        pi = undefined;
+        for (var i in processInfos) {
+          if (processInfos[i].pid === pid) {
+            pi = processInfos.splice(i, 1)[0];
+            logger.debug('Not killing user %s pid=%s: %s %s', process.env.USER,
+                pid, pi.command, pi.args.join(' '));
+            break;
+          }
+        }
+        pid = (pi ? pi.ppid : undefined);
+      }
+      if (processInfos.length > 0) {
+        logger.info('Killing %s pids owned by user %s: %s', processInfos.length,
+            process.env.USER,
+            processInfos.map(function(pi) { return pi.pid; }).join(', '));
+        process_utils.scheduleKillAll(
+            this.app_, 'Kill dangling pids', processInfos);
+      }
+    }.bind(this));
+  }
+  this.scheduleCleanRunTempDir_();
 };
 
 /**
@@ -409,21 +459,26 @@ exports.setSystemCommands = function() {
  */
 exports.main = function(flags) {
   'use strict';
+  var versionMatch = /^v(\d+)\.(\d+)(?:\.\d+)?$/.exec(process.version);
+  if (!versionMatch) {
+    throw new Error('Cannot parse NodeJS version: ' + process.version);
+  }
+  if (parseInt(versionMatch[1], 10) !== 0 ||
+      parseInt(versionMatch[2], 10) < 8) {
+    throw new Error('node version must be >=0.8, not ' + process.version);
+  }
   exports.setSystemCommands();
-  if (flags.devtools2har_jar) {
-    devtools2har.setDevToolsToHarJar(flags.devtools2har_jar);
-  } else {
-    throw new Error('Flag --devtools2har_jar is required');
-  }
-  if (!flags.selenium_jar && !flags.chromedriver) {
-    throw new Error('Either --selenium_jar or --chromedriver is required');
-  }
-  var client = new wpt_client.Client(flags.wpt_server, flags.location,
-      flags.api_key, flags.job_timeout);
+  delete flags.argv; // Remove nopt dup
+  var client = new wpt_client.Client(flags);
   var agent = new Agent(client, flags);
   agent.run();
 };
 
 if (require.main === module) {
-  exports.main(nopt(flagDefs.knownOpts, flagDefs.shortHands, process.argv, 2));
+  try {
+    exports.main(nopt(knownOpts, {}, process.argv, 2));
+  } catch (e) {
+    console.error(e);
+    process.exit(-1);
+  }
 }

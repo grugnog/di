@@ -32,6 +32,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wpt_test_hook.h"
 #include "mongoose/mongoose.h"
 #include "test_state.h"
+#include "dev_tools.h"
+#include "trace.h"
 #include "requests.h"
 #include <atlutil.h>
 
@@ -52,6 +54,8 @@ static const char * BLANK_HTML = "HTTP/1.1 200 OK\r\n"
     "Content-Type:text/html\r\n"
     "\r\n"
     "<html><head><title>Blank</title>\r\n"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, "
+    "maximum-scale=1.0, user-scalable=0;\">\r\n"
     "<style type=\"text/css\">\r\n"
     "body {background-color: #FFF;}\r\n"
     "</style>\r\n"
@@ -63,12 +67,14 @@ static const char * BLANK_HTML = "HTTP/1.1 200 OK\r\n"
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 TestServer::TestServer(WptHook& hook, WptTestHook &test, TestState& test_state,
-                        Requests& requests)
+                        Requests& requests, DevTools &dev_tools, Trace &trace)
   :mongoose_context_(NULL)
   ,hook_(hook)
   ,test_(test)
   ,test_state_(test_state)
-  ,requests_(requests) {
+  ,requests_(requests)
+  ,dev_tools_(dev_tools)
+  ,trace_(trace) {
   InitializeCriticalSection(&cs);
 }
 
@@ -133,6 +139,7 @@ void TestServer::MongooseCallback(enum mg_event event,
 
   EnterCriticalSection(&cs);
   if (event == MG_NEW_REQUEST) {
+    //OutputDebugStringA(CStringA(request_info->uri) + CStringA("?") + request_info->query_string);
     WptTrace(loglevel::kFrequentEvent, _T("[wpthook] HTTP Request: %s\n"), 
                     (LPCTSTR)CA2T(request_info->uri));
     WptTrace(loglevel::kFrequentEvent, _T("[wpthook] HTTP Query String: %s\n"), 
@@ -145,52 +152,80 @@ void TestServer::MongooseCallback(enum mg_event event,
         hook_.Start();
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, task);
     } else if (strcmp(request_info->uri, "/event/load") == 0) {
+      CString fixed_viewport = GetParam(request_info->query_string,
+                                        "fixedViewport");
+      if (!fixed_viewport.IsEmpty())
+        test_state_._fixed_viewport = _ttoi(fixed_viewport);
+      DWORD dom_count = 0;
+      if (GetDwordParam(request_info->query_string, "domCount", dom_count) &&
+          dom_count)
+        test_state_._dom_element_count = dom_count;
       // Browsers may get "/event/window_timing" to set "onload" time.
+      DWORD load_time = 0;
+      GetDwordParam(request_info->query_string, "timestamp", load_time);
       hook_.OnLoad();
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/window_timing") == 0) {
-      DWORD start = GetDwordParam(request_info->query_string,
-                                  "domContentLoadedEventStart");
-      DWORD end = GetDwordParam(request_info->query_string,
-                                "domContentLoadedEventEnd");
+      DWORD start = 0;
+      GetDwordParam(request_info->query_string, "domContentLoadedEventStart",
+                    start);
+      DWORD end = 0;
+      GetDwordParam(request_info->query_string, "domContentLoadedEventEnd",
+                    end);
+      if (start < 0 || start > 3600000)
+        start = 0;
+      if (end < 0 || end > 3600000)
+        end = 0;
       hook_.SetDomContentLoadedEvent(start, end);
-
-      // To set "onload" time, browsers may request "/event/load".
-      start = GetDwordParam(request_info->query_string, "loadEventStart");
-      end = GetDwordParam(request_info->query_string, "loadEventEnd");
+      start = 0;
+      GetDwordParam(request_info->query_string, "loadEventStart", start);
+      end = 0;
+      GetDwordParam(request_info->query_string, "loadEventEnd", end);
+      if (start < 0 || start > 3600000)
+        start = 0;
+      if (end < 0 || end > 3600000)
+        end = 0;
       hook_.SetLoadEvent(start, end);
+      DWORD first_paint = 0;
+      GetDwordParam(request_info->query_string, "msFirstPaint", first_paint);
+      if (first_paint < 0 || first_paint > 3600000)
+        first_paint = 0;
+      hook_.SetFirstPaint(first_paint);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/navigate") == 0) {
       hook_.OnNavigate();
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/complete") == 0) {
+      hook_.OnNavigateComplete();
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/navigate_error") == 0) {
       CString err_str = GetUnescapedParam(request_info->query_string, "str");
       test_state_.OnStatusMessage(CString(_T("Navigation Error: ")) + err_str);
-      test_state_._test_result = GetDwordParam(request_info->query_string, 
-                                                "error");
+      GetIntParam(request_info->query_string, "error",
+                  test_state_._test_result);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri,"/event/all_dom_elements_loaded")==0) {
-      DWORD load_time = GetDwordParam(request_info->query_string, "load_time");
+      DWORD load_time = 0;
+      GetDwordParam(request_info->query_string, "load_time", load_time);
       hook_.OnAllDOMElementsLoaded(load_time);
       // TODO: Log the all dom elements loaded time into its metric.
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/dom_element") == 0) {
-      DWORD time = GetDwordParam(request_info->query_string, "load_time");
+      DWORD time = 0;
+      GetDwordParam(request_info->query_string, "load_time", time);
       CString dom_element = GetUnescapedParam(request_info->query_string,
                                                "name_value");
       // TODO: Store the dom element loaded time.
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/title") == 0) {
       CString title = GetParam(request_info->query_string, "title");
-      if (!title.IsEmpty()) {
+      if (!title.IsEmpty())
         test_state_.TitleSet(title);
-      }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/status") == 0) {
       CString status = GetParam(request_info->query_string, "status");
-      if (!status.IsEmpty()) {
+      if (!status.IsEmpty())
         test_state_.OnStatusMessage(status);
-      }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/request_data") == 0) {
       if (test_state_._active) {
@@ -205,18 +240,44 @@ void TestServer::MongooseCallback(enum mg_event event,
         test_state_.AddConsoleLogMessage(body);
       }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
-    } else if (strcmp(request_info->uri, "/event/timeline") == 0) {
+    } else if (strcmp(request_info->uri, "/event/timed_event") == 0) {
+      test_state_.AddTimedEvent(GetPostBody(conn, request_info));
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/stats") == 0) {
+      DWORD dom_count = 0;
+      if (GetDwordParam(request_info->query_string, "domCount", dom_count) &&
+          dom_count)
+        test_state_._dom_element_count = dom_count;
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/devTools") == 0) {
       if (test_state_._active) {
-        CString body = GetPostBody(conn, request_info);
-        test_state_.AddTimelineEvent(body);
+        CStringA body = CT2A(GetPostBody(conn, request_info));
+        if (body.GetLength())
+          dev_tools_.AddRawEvents(body);
       }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/trace") == 0) {
-      CString body = GetPostBody(conn, request_info);
-      OutputDebugString(body);
+      if (test_state_._active) {
+        CStringA body = CT2A(GetPostBody(conn, request_info));
+        OutputDebugStringA(body);
+        if (body.GetLength())
+          trace_.AddEvents(body);
+      }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
-    } else if (strcmp(request_info->uri, "/blank.html") == 0) {
+    } else if (strcmp(request_info->uri, "/event/paint") == 0) {
+      //test_state_.PaintEvent(0, 0, 0, 0);
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/received_data") == 0) {
+      test_state_.received_data_ = true;
+    } else if (strncmp(request_info->uri, "/blank", 6) == 0) {
+      test_state_.UpdateBrowserWindow();
       mg_printf(conn, BLANK_HTML);
+    } else if (strcmp(request_info->uri, "/event/responsive") == 0) {
+      GetIntParam(request_info->query_string, "isResponsive",
+                  test_state_._is_responsive);
+      GetIntParam(request_info->query_string, "viewportSpecified",
+                  test_state_._viewport_specified);
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else {
         // unknown command fall-through
         SendResponse(conn, request_info, RESPONSE_ERROR_NOT_IMPLEMENTED, 
@@ -322,9 +383,26 @@ CString TestServer::GetParam(const CString query_string,
   return value;
 }
 
-DWORD TestServer::GetDwordParam(const CString query_string,
-                                const CString key) const {
-  return _ttoi(GetParam(query_string, key));
+bool TestServer::GetDwordParam(const CString query_string,
+                                const CString key, DWORD& value) const {
+  bool found = false;
+  CString string_value = GetParam(query_string, key);
+  if (string_value.GetLength()) {
+    found = true;
+    value = _ttoi(string_value);
+  }
+  return found;
+}
+
+bool TestServer::GetIntParam(const CString query_string,
+                                const CString key, int& value) const {
+  bool found = false;
+  CString string_value = GetParam(query_string, key);
+  if (string_value.GetLength()) {
+    found = true;
+    value = _ttoi(string_value);
+  }
+  return found;
 }
 
 /*-----------------------------------------------------------------------------

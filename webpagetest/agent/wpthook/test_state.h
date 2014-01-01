@@ -31,6 +31,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 class Results;
 class ScreenCapture;
 class WptTestHook;
+class DevTools;
+class Trace;
 
 const int TEST_RESULT_NO_ERROR = 0;
 const int TEST_RESULT_TIMEOUT = 99997;
@@ -39,7 +41,9 @@ const int TEST_RESULT_CONTENT_ERROR = 99999;
 
 class ProgressData {
 public:
-  ProgressData(void):_bpsIn(0),_cpu(0.0),_mem(0){ _time.QuadPart = 0; }
+  ProgressData(void):_bpsIn(0),_cpu(0.0),_mem(0),_process_count(0) {
+    _time.QuadPart = 0; 
+  }
   ProgressData(const ProgressData& src){*this = src;}
   ~ProgressData(){       }
   const ProgressData& operator =(const ProgressData& src) {
@@ -47,13 +51,15 @@ public:
     _bpsIn = src._bpsIn;
     _cpu = src._cpu;
     _mem = src._mem;
+    _process_count = src._process_count;
     return src;
   }
   
   LARGE_INTEGER   _time;
   DWORD           _bpsIn;          // inbound bandwidth
   double          _cpu;            // CPU utilization
-  DWORD           _mem;            // Working set size (in KB)
+  DWORD           _mem;            // allocated memory (in KB)
+  DWORD           _process_count;  // number of browser processes
 };
 
 class StatusMessage {
@@ -76,19 +82,23 @@ public:
 
 class TestState {
 public:
-  TestState(Results& results,ScreenCapture& screen_capture, WptTestHook &test);
+  TestState(Results& results, ScreenCapture& screen_capture,
+            WptTestHook &test, DevTools& dev_tools, Trace& trace);
   ~TestState(void);
 
   void Start();
   void ActivityDetected();
   void OnNavigate();
+  void OnNavigateComplete();
   void OnAllDOMElementsLoaded(DWORD load_time);
   void SetDomContentLoadedEvent(DWORD start, DWORD end);
   void SetLoadEvent(DWORD load_event_start, DWORD load_event_end);
+  void SetFirstPaint(DWORD first_paint);
   void OnLoad(); // browsers either call this or SetLoadEvent
   void OnStatusMessage(CString status);
   bool IsDone();
   void GrabVideoFrame(bool force = false);
+  void PaintEvent(int x, int y, int width, int height);
   void CheckStartRender();
   void RenderCheckThread();
   void CollectData();
@@ -96,13 +106,18 @@ public:
   void Init();
   void TitleSet(CString title);
   void UpdateBrowserWindow();
-  void SetDocument(HWND wnd);
   DWORD ElapsedMsFromStart(LARGE_INTEGER end) const;
   void FindBrowserNameAndVersion();
   void AddConsoleLogMessage(CString message);
-  void AddTimelineEvent(CString timeline_event);
+  void AddTimedEvent(CString timed_event);
   CString GetConsoleLogJSON();
-  CString GetTimelineJSON();
+  CString GetTimedEventsJSON();
+  void GetElapsedCPUTimes(double &doc, double &end,
+                          double &doc_total, double &end_total);
+  void Lock();
+  void UnLock();
+  void ResizeBrowserForResponsiveTest();
+  void CheckResponsive();
 
   // times
   LARGE_INTEGER _start;
@@ -114,12 +129,12 @@ public:
   LARGE_INTEGER _on_load;
   DWORD _load_event_start;
   DWORD _load_event_end;
+  DWORD _first_paint;
   LARGE_INTEGER _render_start;
   LARGE_INTEGER _first_activity;
   LARGE_INTEGER _last_activity;
   LARGE_INTEGER _ms_frequency;
   LARGE_INTEGER _title_time;
-  DWORD _aft_time_ms;
   SYSTEMTIME    _start_time;
 
   LARGE_INTEGER _first_byte;
@@ -136,15 +151,20 @@ public:
   CString _browser_name;
   CString _browser_version;
   CString _user_agent;
+  int _fixed_viewport;
+  int _dom_element_count;
+  int _is_responsive;
+  int _viewport_specified;
 
   bool  _active;
-  bool _capturing_aft;
   int   _current_document;
   bool  _exit;
-  bool  _navigated;
+  bool navigated_;
+  bool navigating_;
   bool no_gdi_;
   bool gdi_only_;
   UINT paint_msg_;
+  bool received_data_;
 
   HWND  _frame_window;
   HWND  _document_window;
@@ -156,14 +176,20 @@ public:
   CAtlList<StatusMessage>  _status_messages;   // Browser status
 
 private:
+  bool  _started;
   int   _next_document;
   Results&  _results;
   ScreenCapture& _screen_capture;
+  DevTools &_dev_tools;
+  Trace &_trace;
   HANDLE  _render_check_thread;
   HANDLE  _check_render_event;
   HANDLE  _data_timer;
-  CAtlList<CString>        _timeline_events;  // Chrome dev tools timeline
   CAtlList<CString>        _console_log_messages; // messages to the console
+  CAtlList<CString>        _timed_events; // any supported timed events
+  CString process_full_path_;
+  CString process_base_exe_;
+
 
   // tracking of the periodic data capture
   LARGE_INTEGER  _last_data;
@@ -171,13 +197,21 @@ private:
   ULARGE_INTEGER _last_cpu_kernel;
   ULARGE_INTEGER _last_cpu_user;
   DWORD _video_capture_count;
-  LARGE_INTEGER     _last_video_time;
+  LARGE_INTEGER  _last_video_time;
+  FILETIME      _start_cpu_time;
+  FILETIME      _doc_cpu_time;
+  FILETIME      _end_cpu_time;
+  FILETIME      _start_total_time;
+  FILETIME      _doc_total_time;
+  FILETIME      _end_total_time;
 
   CRITICAL_SECTION  _data_cs;
 
   void Done(bool force = false);
   void CollectSystemStats(LARGE_INTEGER &now);
-  void FindViewport();
+  void FindViewport(bool force = false);
   void RecordTime(CString time_name, DWORD time, LARGE_INTEGER * out_time);
   DWORD ElapsedMs(LARGE_INTEGER start, LARGE_INTEGER end) const;
+  void GetCPUTime(FILETIME &cpu_time, FILETIME &total_time);
+  double GetElapsedMilliseconds(FILETIME &start, FILETIME &end);
 };

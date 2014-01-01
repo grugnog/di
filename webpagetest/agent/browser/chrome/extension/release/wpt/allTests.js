@@ -5379,6 +5379,15 @@ goog.provide('wpt.contentScript');
 
 var DOM_ELEMENT_POLL_INTERVAL = 100;
 
+// override alert boxes
+var injected = document.createElement("script");
+injected.type = "text/javascript";
+injected.innerHTML =
+  "window.alert = function(msg){console.log('Blocked alert: ' + msg);};\n" +
+  "window.confirm = function(msg){console.log('Blocked confirm: ' + msg); return false;};\n" + 
+  "window.prompt = function(msg,def){console.log('Blocked prompt: ' + msg); return null;};\n";
+document.documentElement.appendChild(injected);
+
 // If the namespace is not set up by goog.provide, define the objects
 // it would set up.  We could avoid this sort of hackery by injecting
 // base.js before injecting this script, but the script injection
@@ -5396,7 +5405,30 @@ window.goog['isNull'] = window.goog['isNull'] || function(val) {
 /**
  * @private
  */
-wpt.contentScript.reportTiming_ = function() {
+wpt.contentScript.collectStats_ = function() {
+  // look for any user timing data
+  try {
+    if (window['performance'] != undefined &&
+        (window.performance.getEntriesByType ||
+         window.performance.webkitGetEntriesByType)) {
+      if (window.performance.getEntriesByType)
+        var marks = window.performance.getEntriesByType("mark");
+      else
+        var marks = window.performance.webkitGetEntriesByType("mark");
+      if (marks.length)
+        chrome.extension.sendRequest({'message': 'wptMarks', 
+                                      'marks': marks },
+                                     function(response) {});
+    }
+  } catch(e){
+  }
+
+  var domCount = document.documentElement.getElementsByTagName("*").length;
+  if (domCount === undefined)
+    domCount = 0;
+  chrome.extension.sendRequest({'message': 'wptStats',
+                                'domCount': domCount}, function(response) {});
+  
   var timingRequest = { 'message': 'wptWindowTiming' };
   function addTime(name) {
     if (window.performance.timing[name] > 0) {
@@ -5409,16 +5441,57 @@ wpt.contentScript.reportTiming_ = function() {
   addTime('domContentLoadedEventEnd');
   addTime('loadEventStart');
   addTime('loadEventEnd');
+  timingRequest['msFirstPaint'] = 0;
+  if (window['chrome'] !== undefined &&
+      window.chrome['loadTimes'] !== undefined) {
+    var chromeTimes = window.chrome.loadTimes();
+    if (chromeTimes['firstPaintTime'] !== undefined &&
+        chromeTimes['firstPaintTime'] > 0) {
+      var startTime = chromeTimes['requestTime'] ? chromeTimes['requestTime'] : chromeTimes['startLoadTime'];
+      if (chromeTimes['firstPaintTime'] >= startTime)
+        timingRequest['msFirstPaint'] = (chromeTimes['firstPaintTime'] - startTime) * 1000.0;
+    }
+  }
 
   // Send the times back to the extension.
   chrome.extension.sendRequest(timingRequest, function(response) {});
 };
 
+wpt.contentScript.checkResponsive_ = function() {
+  var response = { 'message': 'wptResponsive' };
+  
+  // check to see if any form of the inner width is bigger than the window size (scroll bars)
+  // default to assuming that the site is responsive and only trigger if we see a case where
+  // we likely have scroll bars
+  var isResponsive = 1;
+  var bsw = document.body.scrollWidth;
+  var desw = document.documentElement.scrollWidth;
+  var wiw = window.innerWidth;
+  if (bsw > wiw)
+    isResponsive = 0;
+  var nodes = document.body.childNodes;
+  for (i in nodes) { 
+    if (nodes[i].scrollWidth > wiw)
+      isResponsive = 0;
+  }
+  response['isResponsive'] = isResponsive;
+  
+  chrome.extension.sendRequest(response, function() {});
+}
+
 // This script is automatically injected into every page before it loads.
 // We need to use it to register for the earliest onLoad callback
 // since the navigation timing times are sometimes questionable.
 window.addEventListener('load', function() {
-  window.setTimeout(wpt.contentScript.reportTiming_, 0);
+  var timestamp = 0;
+  if (window['performance'] != undefined)
+    timestamp = window.performance.now();
+  var fixedViewport = 0;
+  if (document.querySelector("meta[name=viewport]"))
+    fixedViewport = 1;
+  chrome.extension.sendRequest({'message': 'wptLoad',
+                                'fixedViewport': fixedViewport,
+                                'timestamp': timestamp}, function(response) {});
 }, false);
 
 
@@ -5503,6 +5576,10 @@ chrome.extension.onRequest.addListener(
       g_intervalId = window.setInterval(
           function() { pollDOMElement(); },
           DOM_ELEMENT_POLL_INTERVAL);
+    } else if (request.message == 'collectStats') {
+      wpt.contentScript.collectStats_();
+    } else if (request.message == 'checkResponsive') {
+      wpt.contentScript.checkResponsive_();
     }
     sendResponse({});
 });
@@ -17909,6 +17986,8 @@ wpt.logging.closeWindowIfOpen = function() {
 
  ******************************************************************************/
 
+var g_tabid = 0;
+
 goog.require('wpt.logging');
 goog.provide('wpt.commands');
 
@@ -17961,7 +18040,6 @@ function trim(stringToTrim) {
  *                           object.
  */
 wpt.commands.CommandRunner = function(tabId, chromeApi) {
-  this.tabId_ = tabId;
   this.chromeApi_ = chromeApi;
 };
 
@@ -17975,7 +18053,7 @@ wpt.commands.CommandRunner = function(tabId, chromeApi) {
  * @param {Object} commandObject
  */
 wpt.commands.CommandRunner.prototype.SendCommandToContentScript_ = function(
-    commandObject) {
+    commandObject, callback) {
 
   console.log('Delegate a command to the content script: ', commandObject);
 
@@ -17983,7 +18061,10 @@ wpt.commands.CommandRunner.prototype.SendCommandToContentScript_ = function(
               JSON.stringify(commandObject),
               ');'].join('');
   this.chromeApi_.tabs.executeScript(
-      this.tabId_, {'code': code}, function() {});
+      g_tabid, {'code': code}, function() {
+        if (callback != undefined)
+          callback();
+      });
 };
 
 /**
@@ -17993,16 +18074,22 @@ wpt.commands.CommandRunner.prototype.SendCommandToContentScript_ = function(
  * an exception.
  * @param {string} script
  */
-wpt.commands.CommandRunner.prototype.doExec = function(script) {
-  this.chromeApi_.tabs.executeScript(this.tabId_, {'code': script});
+wpt.commands.CommandRunner.prototype.doExec = function(script, callback) {
+  this.chromeApi_.tabs.executeScript(g_tabid, {'code': script}, function(results){
+    if (callback != undefined)
+      callback();
+  });
 };
 
 /**
  * Implement the navigate command.
  * @param {string} url
  */
-wpt.commands.CommandRunner.prototype.doNavigate = function(url) {
-  this.chromeApi_.tabs.update(this.tabId_, {'url': url});
+wpt.commands.CommandRunner.prototype.doNavigate = function(url, callback) {
+  this.chromeApi_.tabs.update(g_tabid, {'url': url}, function(tab){
+    if (callback != undefined)
+      callback();
+  });
 };
 
 /**
@@ -18088,7 +18175,7 @@ wpt.commands.CommandRunner.prototype.doBlockUsingRequestCallback_ =
 
   var requestFilter = {
     urls: [],
-    tabId: this.tabId_
+    tabId: g_tabid
   };
 
   this.chromeApi_.webRequest.onBeforeRequest.addListener(
@@ -18135,12 +18222,12 @@ chrome.webNavigation.onBeforeNavigate.addListener(function(details) {
  */
 wpt.commands.CommandRunner.prototype.doSetDOMElements = function() {
   if (wpt.commands.g_domElements.length > 0) {
-    if (goog.isNull(this.tabId_))
+    if (goog.isNull(g_tabid))
       throw ('It should not be posible to run the doSetDOMElements() method ' +
              'before we find the id of the tab in which pages are loaded.');
 
     chrome.tabs.sendRequest(
-        this.tabId_,
+        g_tabid,
         {'message': 'setDOMElements', name_values: wpt.commands.g_domElements},
         function(response) {});
     wpt.LOG.info('doSetDOMElements for :  ' + wpt.commands.g_domElements);
@@ -18151,11 +18238,11 @@ wpt.commands.CommandRunner.prototype.doSetDOMElements = function() {
  * Implement the click command.
  * @param {string} target The DOM element to click, in attribute'value form.
  */
-wpt.commands.CommandRunner.prototype.doClick = function(target) {
+wpt.commands.CommandRunner.prototype.doClick = function(target, callback) {
   this.SendCommandToContentScript_({
       'command': 'click',
       'target': target
-  });
+  }, callback);
 };
 
 /**
@@ -18163,12 +18250,12 @@ wpt.commands.CommandRunner.prototype.doClick = function(target) {
  * @param {string} target The DOM element to click, in attribute'value form.
  * @param {string} value The value to set.
  */
-wpt.commands.CommandRunner.prototype.doSetInnerHTML = function(target, value) {
+wpt.commands.CommandRunner.prototype.doSetInnerHTML = function(target, value, callback) {
   this.SendCommandToContentScript_({
       'command': 'setInnerHTML',
       'target': target,
       'value': value
-  });
+  }, callback);
 };
 
 /**
@@ -18176,12 +18263,12 @@ wpt.commands.CommandRunner.prototype.doSetInnerHTML = function(target, value) {
  * @param {string} target The DOM element to click, in attribute'value form.
  * @param {string} value The value to set.
  */
-wpt.commands.CommandRunner.prototype.doSetInnerText = function(target, value) {
+wpt.commands.CommandRunner.prototype.doSetInnerText = function(target, value, callback) {
   this.SendCommandToContentScript_({
       'command': 'setInnerText',
       'target': target,
       'value': value
-  });
+  }, callback);
 };
 
 /**
@@ -18189,34 +18276,40 @@ wpt.commands.CommandRunner.prototype.doSetInnerText = function(target, value) {
  * @param {string} target The DOM element to set, in attribute'value form.
  * @param {string} value The value to set the target to.
  */
-wpt.commands.CommandRunner.prototype.doSetValue = function(target, value) {
+wpt.commands.CommandRunner.prototype.doSetValue = function(target, value, callback) {
   this.SendCommandToContentScript_({
       'command': 'setValue',
       'target': target,
       'value': value
-  });
+  }, callback);
 };
 
 /**
  * Implement the submitForm command.
  * @param {string} target The DOM element to set, in attribute'value form.
  */
-wpt.commands.CommandRunner.prototype.doSubmitForm = function(target) {
+wpt.commands.CommandRunner.prototype.doSubmitForm = function(target, callback) {
   this.SendCommandToContentScript_({
       'command': 'submitForm',
       'target': target
-  });
+  }, callback);
 };
 
 /**
  * Implement the clearcache command.
  * @param {string} options
  */
-wpt.commands.CommandRunner.prototype.doClearCache = function(options) {
+wpt.commands.CommandRunner.prototype.doClearCache = function(options, callback) {
   if (this.chromeApi_['browsingData'] != undefined) {
-    this.chromeApi_.browsingData.removeCache({}, function() {});
+    this.chromeApi_.browsingData.removeCache({}, function() {
+      if (callback != undefined)
+        callback();
+    });
   } else if (this.chromeApi_.experimental['clear'] != undefined) {
-    this.chromeApi_.experimental.clear.cache(0, function() {});
+    this.chromeApi_.experimental.clear.cache(0, function() {
+      if (callback != undefined)
+        callback();
+    });
   }
 };
 
@@ -18224,11 +18317,29 @@ wpt.commands.CommandRunner.prototype.doClearCache = function(options) {
  * Implement the noscript command.
  */
 wpt.commands.CommandRunner.prototype.doNoScript = function() {
-  console.log("disabling javascript");
   this.chromeApi_.contentSettings.javascript.set({
     'primaryPattern': '<all_urls>',
     'setting': 'block'
   });
+};
+
+/**
+ * Implement the collectStats command.
+ */
+wpt.commands.CommandRunner.prototype.doCollectStats = function(callback) {
+  chrome.tabs.sendRequest( g_tabid, {'message': 'collectStats'},
+      function(response) {
+        if (callback != undefined)
+          callback();
+      });
+};
+
+wpt.commands.CommandRunner.prototype.doCheckResponsive = function(callback) {
+  chrome.tabs.sendRequest( g_tabid, {'message': 'checkResponsive'},
+      function(response) {
+        if (callback != undefined)
+          callback();
+      });
 };
 
 })());  // namespace

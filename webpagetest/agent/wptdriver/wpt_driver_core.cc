@@ -31,6 +31,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wpt_driver_core.h"
 #include "zlib/contrib/minizip/unzip.h"
 #include <Wtsapi32.h>
+#include <D3D9.h>
 
 const TCHAR * BROWSERS[] = {
   _T("chrome.exe"),
@@ -38,7 +39,16 @@ const TCHAR * BROWSERS[] = {
   _T("iexplore.exe")
 };
 
+const TCHAR * DIALOG_WHITELIST[] = { 
+  _T("urlblast")
+  , _T("url blast")
+  , _T("task manager")
+  , _T("aol pagetest")
+  , _T("shut down windows")
+};
+
 const DWORD SOFTWARE_INSTALL_RETRY_DELAY = 30000; // try every 30 seconds
+const DWORD HOUSEKEEPING_INTERVAL = 500;
 
 WptDriverCore * global_core = NULL;
 extern HINSTANCE hInst;
@@ -50,9 +60,15 @@ WptDriverCore::WptDriverCore(WptStatus &status):
   ,_webpagetest(_settings, _status)
   ,_browser(NULL)
   ,_exit(false)
-  ,_work_thread(NULL) {
+  ,_work_thread(NULL)
+  ,housekeeping_timer_(NULL)
+  ,has_gpu_(false)
+  ,watchdog_started_(false)
+  ,_settings(status) {
   global_core = this;
   _testing_mutex = CreateMutex(NULL, FALSE, _T("Global\\WebPagetest"));
+  has_gpu_ = DetectGPU();
+  _webpagetest.has_gpu_ = has_gpu_;
 }
 
 
@@ -76,30 +92,22 @@ static unsigned __stdcall WorkThreadProc(void* arg) {
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
+void __stdcall DoHouseKeeping(PVOID lpParameter, BOOLEAN TimerOrWaitFired) {
+  if( lpParameter )
+    ((WptDriverCore *)lpParameter)->DoHouseKeeping();
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
 void WptDriverCore::Start(void){
   _status.Set(_T("Starting..."));
 
   if( _settings.Load() ){
-    // launch the watchdog
-    TCHAR path[MAX_PATH];
-    GetModuleFileName(NULL, path, MAX_PATH);
-    lstrcpy(PathFindFileName(path), _T("wptwatchdog.exe"));
-    CString watchdog;
-    watchdog.Format(_T("\"%s\" %d"), path, GetCurrentProcessId());
-    HANDLE process = NULL;
-    LaunchProcess(watchdog, &process);
-    if (process)
-      CloseHandle(process);
-
     // boost our priority
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 
     WaitForSingleObject(_testing_mutex, INFINITE);
     SetupScreen();
-    _status.Set(_T("Initializing Dummynet..."));
-    if (!_ipfw.Init()) {
-      _status.Set(_T("Failed to initialize Dummynet..."));
-    }
     ReleaseMutex(_testing_mutex);
 
     // start a background thread to do all of the actual test management
@@ -135,45 +143,57 @@ void WptDriverCore::Stop(void) {
 -----------------------------------------------------------------------------*/
 void WptDriverCore::WorkThread(void) {
   Sleep(_settings._startup_delay * SECONDS_TO_MS);
+
   WaitForSingleObject(_testing_mutex, INFINITE);
   Init();  // do initialization and machine configuration
   ReleaseMutex(_testing_mutex);
+
   _status.Set(_T("Running..."));
   while (!_exit) {
     WaitForSingleObject(_testing_mutex, INFINITE);
     _status.Set(_T("Checking for software updates..."));
     _settings.UpdateSoftware();
     _status.Set(_T("Checking for work..."));
-    WptTestDriver test(_settings._timeout * SECONDS_TO_MS);
+    WptTestDriver test(_settings._timeout * SECONDS_TO_MS, has_gpu_);
     if (_webpagetest.GetTest(test)) {
+      PreTest();
+      test._run = test._specific_run ? test._specific_run : 1;
       _status.Set(_T("Starting test..."));
-      if (_settings.SetBrowser(test._browser)) {
+      if (_settings.SetBrowser(test._browser, test._browser_url,
+                               test._browser_md5, test._client)) {
         WebBrowser browser(_settings, test, _status, _settings._browser, 
                            _ipfw);
         if (SetupWebPageReplay(test, browser) &&
             !TracerouteTest(test)) {
-          test._index = 1;
+          test._index = test._specific_index ? test._specific_index : 1;
           for (test._run = 1; test._run <= test._runs; test._run++) {
+            test._run_error.Empty();
+            test._run = test._specific_run ? test._specific_run : test._run;
             test._clear_cache = true;
             BrowserTest(test, browser);
             if (!test._fv_only) {
+              test._run_error.Empty();
               test._clear_cache = false;
               BrowserTest(test, browser);
             }
-            if (test._discard > 0) {
+            if (test._specific_run)
+              break;
+            else if (test._discard > 0)
               test._discard--;
-            } else {
+            else
               test._index++;
-            }
           }
         }
-
-        bool uploaded = false;
-        for (int count = 0; count < UPLOAD_RETRY_COUNT && !uploaded;count++ ) {
-          uploaded = _webpagetest.TestDone(test);
-          if( !uploaded )
-            Sleep(UPLOAD_RETRY_DELAY * SECONDS_TO_MS);
-        }
+        test._run = test._specific_run ? test._specific_run : test._runs;
+      } else {
+        test._test_error = test._run_error =
+            CStringA("Invalid Browser Selected: ") + CT2A(test._browser);
+      }
+      bool uploaded = false;
+      for (int count = 0; count < UPLOAD_RETRY_COUNT && !uploaded;count++ ) {
+        uploaded = _webpagetest.TestDone(test);
+        if( !uploaded )
+          Sleep(UPLOAD_RETRY_DELAY * SECONDS_TO_MS);
       }
       ReleaseMutex(_testing_mutex);
     } else {
@@ -186,6 +206,7 @@ void WptDriverCore::WorkThread(void) {
       }
     }
   }
+  Cleanup();
 }
 
 /*-----------------------------------------------------------------------------
@@ -221,22 +242,23 @@ bool WptDriverCore::BrowserTest(WptTestDriver& test, WebBrowser &browser) {
     attempt++;
     test.SetFileBase();
     if (test._clear_cache) {
-      browser.ClearUserData();
       FlushDNS();
-      FlushCertCaches();
+      browser.ClearUserData();
     }
     if (test._tcpdump)
       _winpcap.StartCapture( test._file_base + _T(".cap") );
 
+    SetCursorPos(0,0);
+    ShowCursor(FALSE);
     ret = browser.RunAndWait(critical_error);
+    ShowCursor(TRUE);
 
     if (test._tcpdump)
       _winpcap.StopCapture();
     KillBrowsers();
 
-    if (test._discard) {
+    if (test._discard)
       _webpagetest.DeleteIncrementalResults(test);
-    }
     if (attempt < 2 && critical_error) {
       WptTrace(loglevel::kWarning, 
         _T("[wptdriver] Critical error, re-installing browser (attempt %d)\n"),
@@ -244,11 +266,10 @@ bool WptDriverCore::BrowserTest(WptTestDriver& test, WebBrowser &browser) {
       _webpagetest.DeleteIncrementalResults(test);
       _settings.ReInstallBrowser();
     } else {
-      if (test._upload_incremental_results && !test._discard) {
+      if (test._upload_incremental_results && !test._discard)
         _webpagetest.UploadIncrementalResults(test);
-      } else {
+      else
         _webpagetest.DeleteIncrementalResults(test);
-      }
     }
   } while (attempt < 2 && critical_error);
 
@@ -264,6 +285,10 @@ typedef HRESULT (STDAPICALLTYPE* DLLREG)(void);
   Do any startup initialization (settings have already loaded)
 -----------------------------------------------------------------------------*/
 void WptDriverCore::Init(void){
+
+  // Clear IE's caches
+  LaunchProcess(_T("RunDll32.exe InetCpl.cpl,ClearMyTracksByProcess 6655"));
+
   // set the OS to not boost foreground processes
   HKEY hKey;
   if (SUCCEEDED(RegOpenKeyEx(HKEY_LOCAL_MACHINE, 
@@ -290,16 +315,57 @@ void WptDriverCore::Init(void){
     }
   }
 
+  // Disable IE auto-updates
+	if (SUCCEEDED(RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+      _T("SOFTWARE\\Microsoft\\Internet Explorer\\Setup\\9.0"), 0, 0, 0,
+      KEY_READ | KEY_WRITE, NULL, &hKey, NULL))) {
+		DWORD val = 1;
+		RegSetValueEx(hKey, _T("DoNotAllowIE90"), 0, REG_DWORD,
+                  (LPBYTE)&val, sizeof(val));
+		RegCloseKey(hKey);
+	}
+	if (SUCCEEDED(RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+      _T("SOFTWARE\\Microsoft\\Internet Explorer\\Setup\\10.0"), 0, 0, 0,
+      KEY_READ | KEY_WRITE, NULL, &hKey, NULL))) {
+		DWORD val = 1;
+		RegSetValueEx(hKey, _T("DoNotAllowIE10"), 0, REG_DWORD,
+                  (LPBYTE)&val, sizeof(val));
+		RegCloseKey(hKey);
+	}
+	if (SUCCEEDED(RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+      _T("SOFTWARE\\Microsoft\\Internet Explorer\\Setup\\11.0"), 0, 0, 0,
+      KEY_READ | KEY_WRITE, NULL, &hKey, NULL))) {
+		DWORD val = 1;
+		RegSetValueEx(hKey, _T("DoNotAllowIE11"), 0, REG_DWORD,
+                  (LPBYTE)&val, sizeof(val));
+		RegCloseKey(hKey);
+	}
+
+
   // Get WinPCap ready (install it if necessary)
   _winpcap.Initialize();
 
   KillBrowsers();
+
+  // start the background timer that does our housekeeping
+  CreateTimerQueueTimer(&housekeeping_timer_, NULL, ::DoHouseKeeping, this, 
+      HOUSEKEEPING_INTERVAL, HOUSEKEEPING_INTERVAL, WT_EXECUTEDEFAULT);
 
   _status.Set(_T("Installing software..."));
   while( !_settings.UpdateSoftware() && !_exit ) {
     _status.Set(_T("Software install failed, waiting to try again..."));
     Sleep(SOFTWARE_INSTALL_RETRY_DELAY);
     _status.Set(_T("Installing software..."));
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Do our cleanup on exit
+-----------------------------------------------------------------------------*/
+void WptDriverCore::Cleanup(void){
+  if (housekeeping_timer_) {
+    DeleteTimerQueueTimer(NULL, housekeeping_timer_, NULL);
+    housekeeping_timer_ = NULL;
   }
 }
 
@@ -334,17 +400,6 @@ void WptDriverCore::FlushDNS(void) {
 
   if (!flushed)
     LaunchProcess(_T("ipconfig.exe /flushdns"));
-}
-
-/*-----------------------------------------------------------------------------
-  Empty the OS CRL and OCSP caches
------------------------------------------------------------------------------*/
-void WptDriverCore::FlushCertCaches(void) {
-  _status.Set(_T("Flushing Certificate caches..."));
-
-  LaunchProcess(_T("certutil.exe -urlcache * delete"));
-  LaunchProcess(
-    _T("certutil.exe -setreg chain\\ChainCacheResyncFiletime @now"));
 }
 
 /*-----------------------------------------------------------------------------
@@ -495,28 +550,34 @@ void WptDriverCore::SetupScreen(void) {
   int index = 0;
   DWORD targetWidth = 1920;
   DWORD targetHeight = 1200;
+  DWORD min_bpp = 15;
   while( EnumDisplaySettings( NULL, index, &mode) ) {
     index++;
-
+    bool use_mode = false;
     if (x >= targetWidth && y >= targetHeight && bpp >= 24) {
       // we already have at least one suitable resolution.  
       // Make sure we didn't overshoot and pick too high of a resolution
       // or see if a higher bpp is available
       if (mode.dmPelsWidth >= targetWidth && mode.dmPelsWidth <= x &&
           mode.dmPelsHeight >= targetHeight && mode.dmPelsHeight <= y &&
-          mode.dmBitsPerPel >= bpp) {
-        x = mode.dmPelsWidth;
-        y = mode.dmPelsHeight;
-        bpp = mode.dmBitsPerPel;
-      }
+          mode.dmBitsPerPel >= bpp)
+        use_mode = true;
     } else {
-      if( (mode.dmPelsWidth >= targetWidth || mode.dmPelsWidth >= x) && 
-          (mode.dmPelsHeight >= targetHeight || mode.dmPelsHeight >= y) && 
-           mode.dmBitsPerPel >= 24 ) {
+      if (mode.dmPelsWidth == x && mode.dmPelsHeight == y) {
+        if (mode.dmBitsPerPel >= bpp)
+          use_mode = true;
+      } else if ((mode.dmPelsWidth >= targetWidth ||
+                  mode.dmPelsWidth >= x) &&
+                 (mode.dmPelsHeight >= targetHeight ||
+                  mode.dmPelsHeight >= y) && 
+                 mode.dmBitsPerPel >= min_bpp) {
+          use_mode = true;
+      }
+    }
+    if (use_mode) {
         x = mode.dmPelsWidth;
         y = mode.dmPelsHeight;
         bpp = mode.dmBitsPerPel;
-      }
     }
   }
 
@@ -543,4 +604,155 @@ void WptDriverCore::SetupScreen(void) {
 -----------------------------------------------------------------------------*/
 void WptDriverCore::SetupDummynet(void) {
   _status.Set(_T("Configuring dummynet..."));
+}
+
+/*-----------------------------------------------------------------------------
+  Take care of the periodic housekeeping tasks (closing dialogs,
+  terminating processes)
+-----------------------------------------------------------------------------*/
+void WptDriverCore::DoHouseKeeping(void) {
+  CloseDialogs();
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void WptDriverCore::CloseDialogs(void) {
+  TCHAR szTitle[1025];
+  // make sure wptdriver isn't doing a software install
+  bool installing = false;
+  HWND hWptDriver = ::FindWindow(_T("wptdriver_wnd"), NULL);
+  if (hWptDriver) {
+    if (::GetWindowText(hWptDriver, szTitle, _countof(szTitle))) {
+      CString title = szTitle;
+      title.MakeLower();
+      if (title.Find(_T(" software")) >= 0)
+        installing = true;
+    }
+  }
+
+  // if there are any explorer windows open, disable this code
+  // (for local debugging and other work)
+  if (!installing && !::FindWindow(_T("CabinetWClass"), NULL )) {
+    HWND hDesktop = ::GetDesktopWindow();
+    HWND hWnd = ::GetWindow(hDesktop, GW_CHILD);
+    TCHAR szClass[100];
+    CAtlArray<HWND> hDlg;
+
+    // build a list of dialogs to close
+    while (hWnd) {
+      if (hWnd != _status._wnd) {
+        if (::IsWindowVisible(hWnd))
+          if (::GetClassName(hWnd, szClass, 100))
+            if (!lstrcmp(szClass,_T("#32770")) ||
+                !lstrcmp(szClass,_T("Internet Explorer_Server"))) {
+              bool bKill = true;
+
+              // make sure it is not in our list of windows to keep
+              if (::GetWindowText( hWnd, szTitle, 1024)) {
+                _tcslwr_s(szTitle, _countof(szTitle));
+                for (int i = 0; i < _countof(DIALOG_WHITELIST) && bKill; i++) {
+                  if(_tcsstr(szTitle, DIALOG_WHITELIST[i]))
+                    bKill = false;
+                }
+                
+                // do we have to terminate the process that owns it?
+                if (!lstrcmp(szTitle, _T("server busy"))) {
+                  DWORD pid;
+                  GetWindowThreadProcessId(hWnd, &pid);
+                  HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+                  if (hProcess) {
+                    TerminateProcess(hProcess, 0);
+                    CloseHandle(hProcess);
+                  }
+                }
+              }
+            
+              if(bKill)
+                hDlg.Add(hWnd);	
+            }
+      }
+      hWnd = ::GetWindow(hWnd, GW_HWNDNEXT);
+    }
+
+    for (size_t i = 0; i < hDlg.GetCount(); i++)
+      ::PostMessage(hDlg[i],WM_CLOSE,0,0);
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  See if a video adapter is present that supports hardware acceleration
+-----------------------------------------------------------------------------*/
+bool WptDriverCore::DetectGPU() {
+  bool has_gpu = false;
+  HMODULE dll = LoadLibrary(_T("d3d9.dll"));
+  if (dll) {
+    typedef IDirect3D9 *(__stdcall * LPDIRECT3DCREATE9)(UINT SDKVersion);
+    LPDIRECT3DCREATE9 Direct3DCreate9_ =
+        (LPDIRECT3DCREATE9)GetProcAddress(dll, "Direct3DCreate9");
+    if (Direct3DCreate9_) {
+      LPDIRECT3D9 d3d = Direct3DCreate9_(D3D_SDK_VERSION);
+      if (d3d) {
+        static const TCHAR windowName[] = TEXT("WPTDxDetect");
+        static const TCHAR className[] = TEXT("STATIC");
+        HWND wnd = CreateWindowEx(WS_EX_NOACTIVATE, className, windowName,
+                                  WS_DISABLED | WS_POPUP, 0, 0, 1, 1,
+                                  HWND_MESSAGE, NULL,
+                                  GetModuleHandle(NULL), NULL);
+        LPDIRECT3DDEVICE9 device = NULL;
+        D3DPRESENT_PARAMETERS present_parameters; 
+        ZeroMemory( &present_parameters, sizeof(present_parameters) );
+        present_parameters.AutoDepthStencilFormat = D3DFMT_UNKNOWN;
+        present_parameters.BackBufferCount = 1;
+        present_parameters.BackBufferFormat = D3DFMT_UNKNOWN;
+        present_parameters.BackBufferWidth = 1;
+        present_parameters.BackBufferHeight = 1;
+        present_parameters.EnableAutoDepthStencil = FALSE;
+        present_parameters.Flags = 0;
+        present_parameters.hDeviceWindow = wnd;
+        present_parameters.MultiSampleQuality = 0;
+        present_parameters.MultiSampleType = D3DMULTISAMPLE_NONE;
+        present_parameters.PresentationInterval = D3DPRESENT_INTERVAL_DEFAULT;
+        present_parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        present_parameters.Windowed = TRUE;
+
+        if (SUCCEEDED(d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
+            wnd, D3DCREATE_FPU_PRESERVE | D3DCREATE_NOWINDOWCHANGES |
+            D3DCREATE_SOFTWARE_VERTEXPROCESSING, &present_parameters,
+            &device)) && device) {
+          has_gpu = true;
+          device->Release();
+        } else if (SUCCEEDED(d3d->CreateDevice(D3DADAPTER_DEFAULT,
+            D3DDEVTYPE_HAL, wnd,
+            D3DCREATE_FPU_PRESERVE | D3DCREATE_NOWINDOWCHANGES |
+            D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+            &present_parameters, &device)) && device) {
+          has_gpu = true;
+          device->Release();
+        }
+        if (wnd)
+          DestroyWindow(wnd);
+        d3d->Release();
+      }
+    }
+    FreeLibrary(dll);
+  }
+  return has_gpu;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void WptDriverCore::PreTest() {
+  // launch the watchdog just before executing the first test
+  if (!watchdog_started_) {
+    watchdog_started_ = true;
+    TCHAR path[MAX_PATH];
+    GetModuleFileName(NULL, path, MAX_PATH);
+    lstrcpy(PathFindFileName(path), _T("wptwatchdog.exe"));
+    CString watchdog;
+    watchdog.Format(_T("\"%s\" %d"), path, GetCurrentProcessId());
+    HANDLE process = NULL;
+    LaunchProcess(watchdog, &process);
+    if (process)
+      CloseHandle(process);
+  }
 }

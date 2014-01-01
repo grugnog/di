@@ -31,6 +31,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <Wininet.h>
 #include <Wincrypt.h>
 #include <Shellapi.h>
+#include <IPHlpApi.h>
 #include "zlib/contrib/minizip/zip.h"
 #include "zlib/contrib/minizip/unzip.h"
 #include "util.h"
@@ -43,7 +44,8 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
   _settings(settings)
   ,_status(status)
   ,_version(0)
-  ,_exit(false) {
+  ,_exit(false)
+  ,has_gpu_(false) {
   SetErrorMode(SEM_FAILCRITICALERRORS);
   // get the version number of the binary (for software updates)
   TCHAR file[MAX_PATH];
@@ -73,6 +75,7 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
                       URL_ESCAPE_PERCENT) == S_OK) && lstrlen(escaped))
       _computer_name = escaped;
   }
+  UpdateDNSServers();
 }
 
 /*-----------------------------------------------------------------------------
@@ -90,8 +93,8 @@ bool WebPagetest::GetTest(WptTestDriver& test) {
 
   // build the url for the request
   CString buff;
-  CString url = _settings._server + _T("work/getwork.php?");
-  url += CString(_T("location=")) + _settings._location;
+  CString url = _settings._server + _T("work/getwork.php?shards=1");
+  url += CString(_T("&location=")) + _settings._location;
   if (_settings._key.GetLength())
     url += CString(_T("&key=")) + _settings._key;
   if (_version) {
@@ -102,17 +105,25 @@ bool WebPagetest::GetTest(WptTestDriver& test) {
     url += CString(_T("&pc=")) + _computer_name;
   if (_settings._ec2_instance.GetLength())
     url += CString(_T("&ec2=")) + _settings._ec2_instance;
+  if (_dns_servers.GetLength())
+    url += CString(_T("&dns=")) + _dns_servers;
   ULARGE_INTEGER fd;
   if (GetDiskFreeSpaceEx(_T("C:\\"), NULL, NULL, &fd)) {
     double freeDisk = (double)(fd.QuadPart / (1024 * 1024)) / 1024.0;
     buff.Format(_T("&freedisk=%0.3f"), freeDisk);
     url += buff;
   }
+  url += has_gpu_ ? _T("&GPU=1") : _T("&GPU=0");
 
   CString test_string, zip_file;
   if (HttpGet(url, test, test_string, zip_file)) {
     if (test_string.GetLength()) {
-      ret = test.Load(test_string);
+      if (test.Load(test_string)) {
+        if (!test._client.IsEmpty())
+          ret = GetClient(test);
+        else
+          ret = true;
+      }
     } else if (zip_file.GetLength()) {
       ret = ProcessZipFile(zip_file, test);
     }
@@ -141,12 +152,15 @@ bool WebPagetest::DeleteIncrementalResults(WptTestDriver& test) {
 bool WebPagetest::UploadIncrementalResults(WptTestDriver& test) {
   bool ret = true;
 
-  CString directory = test._directory + CString(_T("\\"));
-  CAtlList<CString> image_files;
-  GetImageFiles(directory, image_files);
-  ret = UploadImages(test, image_files);
-  if (ret) {
-    ret = UploadData(test, false);
+  if (!test._discard_test) {
+    CString directory = test._directory + CString(_T("\\"));
+    CAtlList<CString> image_files;
+    GetImageFiles(directory, image_files);
+    ret = UploadImages(test, image_files);
+    if (ret) {
+      ret = UploadData(test, false);
+      SetCPUUtilization(0);
+    }
   }
 
   return ret;
@@ -158,12 +172,14 @@ bool WebPagetest::UploadIncrementalResults(WptTestDriver& test) {
 bool WebPagetest::TestDone(WptTestDriver& test){
   bool ret = true;
 
+  UpdateDNSServers();
   CString directory = test._directory + CString(_T("\\"));
   CAtlList<CString> image_files;
   GetImageFiles(directory, image_files);
   ret = UploadImages(test, image_files);
   if (ret) {
     ret = UploadData(test, true);
+    SetCPUUtilization(0);
   }
 
   return ret;
@@ -209,7 +225,8 @@ bool WebPagetest::UploadImages(WptTestDriver& test,
   POSITION pos = image_files.GetHeadPosition();
   while (ret && pos) {
     CString file = image_files.GetNext(pos);
-    ret = UploadFile(url, false, test, file);
+    if (!test._discard_test)
+      ret = UploadFile(url, false, test, file);
     if (ret)
       DeleteFile(file);
   }
@@ -224,9 +241,8 @@ bool WebPagetest::UploadData(WptTestDriver& test, bool done) {
   CString file = NO_FILE;
   CString dir = test._directory + CString(_T("\\"));
   ret = CompressResults(dir, dir + _T("results.zip"));
-  if (ret) {
+  if (ret)
     file = dir + _T("results.zip");
-  }
 
   if (ret || done) {
     CString url = _settings._server + _T("work/workdone.php");
@@ -241,8 +257,8 @@ bool WebPagetest::UploadData(WptTestDriver& test, bool done) {
 /*-----------------------------------------------------------------------------
   Perform a http GET operation and return the body as a string
 -----------------------------------------------------------------------------*/
-bool WebPagetest::HttpGet(CString url, WptTestDriver& test, CString& test_string,
-                          CString& zip_file) {
+bool WebPagetest::HttpGet(CString url, WptTestDriver& test,
+                          CString& test_string, CString& zip_file) {
   bool result = false;
 
   // Use WinInet to make the request
@@ -250,43 +266,54 @@ bool WebPagetest::HttpGet(CString url, WptTestDriver& test, CString& test_string
                                     INTERNET_OPEN_TYPE_PRECONFIG,
                                     NULL, NULL, 0);
   if (internet) {
-    DWORD timeout = 30000;
+    DWORD timeout = 300000;
+    DWORD fetch_timeout = 360000;
     InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT, 
                       &timeout, sizeof(timeout));
-    HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
-                                INTERNET_FLAG_NO_CACHE_WRITE | 
-                                INTERNET_FLAG_NO_UI | 
-                                INTERNET_FLAG_PRAGMA_NOCACHE | 
-                                INTERNET_FLAG_RELOAD, NULL);
-    if (http_request) {
-      TCHAR mime_type[1024] = TEXT("\0");
-      DWORD len = _countof(mime_type);
-      if (HttpQueryInfo(http_request,HTTP_QUERY_CONTENT_TYPE, mime_type, 
-                          &len, NULL)) {
-        result = true;
-        bool is_zip = false;
-        char buff[4097];
-        DWORD bytes_read, bytes_written;
-        HANDLE file = INVALID_HANDLE_VALUE;
-        if (!lstrcmpi(mime_type, _T("application/zip"))) {
-          zip_file = test._directory + _T("\\wpt.zip");
-          file = CreateFile(zip_file,GENERIC_WRITE,0,0,CREATE_ALWAYS,0,NULL);
-          is_zip = true;
-        }
-        while (InternetReadFile(http_request, buff, sizeof(buff) - 1, 
-                &bytes_read) && bytes_read) {
-          if (is_zip) {
-            WriteFile(file, buff, bytes_read, &bytes_written, 0);
-          } else {
-            // NULL-terminate it and add it to our response string
-            buff[bytes_read] = 0;
-            test_string += CA2T(buff);
+    InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT, 
+                      &fetch_timeout, sizeof(fetch_timeout));
+    InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT, 
+                      &timeout, sizeof(timeout));
+    CString host, object;
+    unsigned short port;
+    DWORD secure_flag;
+    if (CrackUrl(url, host, port, object, secure_flag)) {
+      HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
+                                  INTERNET_FLAG_NO_CACHE_WRITE | 
+                                  INTERNET_FLAG_NO_UI | 
+                                  INTERNET_FLAG_PRAGMA_NOCACHE | 
+                                  INTERNET_FLAG_RELOAD |
+                                  secure_flag, NULL);
+      if (http_request) {
+        TCHAR mime_type[1024] = TEXT("\0");
+        DWORD len = _countof(mime_type);
+        if (HttpQueryInfo(http_request,HTTP_QUERY_CONTENT_TYPE, mime_type, 
+                            &len, NULL)) {
+          result = true;
+          bool is_zip = false;
+          char buff[4097];
+          DWORD bytes_read, bytes_written;
+          HANDLE file = INVALID_HANDLE_VALUE;
+          if (!lstrcmpi(mime_type, _T("application/zip"))) {
+            zip_file = test._directory + _T("\\wpt.zip");
+            file = CreateFile(zip_file,GENERIC_WRITE,0,0,CREATE_ALWAYS,0,NULL);
+            is_zip = true;
           }
+          while (InternetReadFile(http_request, buff, sizeof(buff) - 1, 
+                  &bytes_read) && bytes_read) {
+            if (is_zip) {
+              WriteFile(file, buff, bytes_read, &bytes_written, 0);
+            } else {
+              // NULL-terminate it and add it to our response string
+              buff[bytes_read] = 0;
+              test_string += CA2T(buff);
+            }
+          }
+          if (file != INVALID_HANDLE_VALUE)
+            CloseHandle(file);
         }
-        if (file != INVALID_HANDLE_VALUE)
-          CloseHandle(file);
+        InternetCloseHandle(http_request);
       }
-      InternetCloseHandle(http_request);
     }
     InternetCloseHandle(internet);
   }
@@ -309,7 +336,7 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
   HANDLE file_handle = INVALID_HANDLE_VALUE;
 
   // build the file name and file size if the file exists
-  if (file.GetLength()) {
+  if (!test._discard_test && file.GetLength()) {
     file_handle = CreateFile(file, GENERIC_READ, FILE_SHARE_READ, 0, 
                               OPEN_EXISTING, 0, 0);
     if (file_handle != INVALID_HANDLE_VALUE) {
@@ -325,9 +352,22 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
     HINTERNET internet = InternetOpen(_T("WebPagetest Driver"), 
               INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (internet) {
+      DWORD timeout = 600000;
+      InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT,
+                        &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT,
+                        &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT,
+                        &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_DATA_SEND_TIMEOUT,
+                        &timeout, sizeof(timeout));
+      InternetSetOption(internet, INTERNET_OPTION_DATA_RECEIVE_TIMEOUT,
+                        &timeout, sizeof(timeout));
+
       CString host, object;
       unsigned short port;
-      if (CrackUrl(url, host, port, object)) {
+      DWORD secure_flag;
+      if (CrackUrl(url, host, port, object, secure_flag)) {
         HINTERNET connect = InternetConnect(internet, host, port, NULL, NULL,
                                             INTERNET_SERVICE_HTTP, 0, 0);
         if (connect){
@@ -336,10 +376,13 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
                                                 INTERNET_FLAG_NO_CACHE_WRITE |
                                                 INTERNET_FLAG_NO_UI |
                                                 INTERNET_FLAG_PRAGMA_NOCACHE |
-                                                INTERNET_FLAG_RELOAD, NULL);
+                                                INTERNET_FLAG_RELOAD |
+                                                INTERNET_FLAG_KEEP_CONNECTION |
+                                                secure_flag, NULL);
           if (request){
             if (HttpAddRequestHeaders(request, headers, headers.GetLength(), 
-                            HTTP_ADDREQ_FLAG_ADD | HTTP_ADDREQ_FLAG_REPLACE)) {
+                                      HTTP_ADDREQ_FLAG_ADD |
+                                      HTTP_ADDREQ_FLAG_REPLACE)) {
               INTERNET_BUFFERS buffers;
               memset( &buffers, 0, sizeof(buffers) );
               buffers.dwStructSize = sizeof(buffers);
@@ -396,18 +439,21 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
   Helper function to crack an url into it's component parts
 -----------------------------------------------------------------------------*/
 bool WebPagetest::CrackUrl(CString url, CString &host, unsigned short &port,
-                            CString& object){
+                           CString& object, DWORD &secure_flag){
   bool ret = false;
 
+  secure_flag = 0;
   URL_COMPONENTS parts;
   memset(&parts, 0, sizeof(parts));
   TCHAR szHost[10000];
   TCHAR path[10000];
   TCHAR extra[10000];
+  TCHAR scheme[100];
     
   memset(szHost, 0, sizeof(szHost));
   memset(path, 0, sizeof(path));
   memset(extra, 0, sizeof(extra));
+  memset(scheme, 0, sizeof(scheme));
 
   parts.lpszHostName = szHost;
   parts.dwHostNameLength = _countof(szHost);
@@ -415,6 +461,8 @@ bool WebPagetest::CrackUrl(CString url, CString &host, unsigned short &port,
   parts.dwUrlPathLength = _countof(path);
   parts.lpszExtraInfo = extra;
   parts.dwExtraInfoLength = _countof(extra);
+  parts.lpszScheme = scheme;
+  parts.dwSchemeLength = _countof(scheme);
   parts.dwStructSize = sizeof(parts);
 
   if( InternetCrackUrl((LPCTSTR)url, url.GetLength(), 0, &parts) ){
@@ -423,10 +471,15 @@ bool WebPagetest::CrackUrl(CString url, CString &host, unsigned short &port,
       port = parts.nPort;
       object = path;
       object += extra;
-      if (!host.CompareNoCase(_T("www.webpagetest.org"))) {
+      if (!host.CompareNoCase(_T("www.webpagetest.org")))
         host = _T("agent.webpagetest.org");
-      }
-      if( !port )
+      if (!lstrcmpi(scheme, _T("https"))) {
+        secure_flag = INTERNET_FLAG_SECURE |
+                      INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
+                      INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+        if (!port)
+          port = INTERNET_DEFAULT_HTTPS_PORT;
+      } else if (!port)
         port = INTERNET_DEFAULT_HTTP_PORT;
   }
   return ret;
@@ -445,6 +498,7 @@ bool WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test,
   footer = "";
   form_data = "";
 
+  CStringA buffA;
   CStringA boundary = "----------ThIs_Is_tHe_bouNdaRY";
   GUID guid;
   if (SUCCEEDED(CoCreateGuid(&guid)))
@@ -472,11 +526,68 @@ bool WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test,
   form_data += "Content-Disposition: form-data; name=\"id\"\r\n\r\n";
   form_data += CStringA(CT2A(test._id)) + "\r\n";
 
+  // run
+  form_data += CStringA("--") + boundary + "\r\n";
+  form_data += "Content-Disposition: form-data; name=\"run\"\r\n\r\n";
+  buffA.Format("%d", test._run);
+  form_data += buffA + "\r\n";
+
+  // index
+  form_data += CStringA("--") + boundary + "\r\n";
+  form_data += "Content-Disposition: form-data; name=\"index\"\r\n\r\n";
+  buffA.Format("%d", test._index);
+  form_data += buffA + "\r\n";
+
+  // cached state
+  form_data += CStringA("--") + boundary + "\r\n";
+  form_data += "Content-Disposition: form-data; name=\"cached\"\r\n\r\n";
+  form_data += test._clear_cache ? "0" : "1";
+  form_data += "\r\n";
+
+  // error string
+  if (test._test_error.GetLength()) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"testerror\"\r\n\r\n";
+    form_data += test._test_error + "\r\n";
+  }
+  if (test._run_error.GetLength()) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"error\"\r\n\r\n";
+    form_data += test._run_error + "\r\n";
+  }
+
   // done flag
   if (done) {
     form_data += CStringA("--") + boundary + "\r\n";
     form_data += "Content-Disposition: form-data; name=\"done\"\r\n\r\n";
     form_data += "1\r\n";
+  }
+
+  if (_computer_name.GetLength()) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"pc\"\r\n\r\n";
+    form_data += CStringA(CT2A(_computer_name)) + "\r\n";
+  }
+
+  if (_settings._ec2_instance.GetLength()) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"ec2\"\r\n\r\n";
+    form_data += CStringA(CT2A(_settings._ec2_instance)) + "\r\n";
+  }
+
+  // DNS servers
+  if (!_dns_servers.IsEmpty()) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"dns\"\r\n\r\n";
+    form_data += CStringA(CT2A(_dns_servers)) + "\r\n";
+  }
+
+  int cpu_utilization = GetCPUUtilization();
+  if (cpu_utilization > 0) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"cpu\"\r\n\r\n";
+    buffA.Format("%d", cpu_utilization);
+    form_data += buffA + "\r\n";
   }
 
   // file
@@ -692,4 +803,146 @@ bool WebPagetest::InstallUpdate(CString dir) {
   }
 
   return ret;
+}
+
+/*-----------------------------------------------------------------------------
+  Download and install the custom browser for the requested test
+-----------------------------------------------------------------------------*/
+bool WebPagetest::GetClient(WptTestDriver& test) {
+  bool ret = false;
+
+  if (!_settings._clients_directory.IsEmpty()) {
+    CString client_dir = _settings._clients_directory + test._client;
+    SHCreateDirectoryEx(NULL, client_dir, NULL);
+    if (GetFileAttributes(client_dir + _T("\\client.ini")) != 
+        INVALID_FILE_ATTRIBUTES) {
+      ret = true;
+    } else {
+      // build the url for the request
+      CString buff;
+      CString url = _settings._server + _T("work/clients/");
+      url += test._client + _T(".zip");
+      CString test_string, zip_file;
+      if (HttpGet(url, test, test_string, zip_file) &&
+          zip_file.GetLength() &&
+          UnzipTo(zip_file, client_dir) &&
+          GetFileAttributes(client_dir + _T("\\client.ini")) != 
+            INVALID_FILE_ATTRIBUTES)
+        ret = true;
+
+      if (zip_file.GetLength())
+        DeleteFile(zip_file);
+    }
+  }
+
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+  Unzip the given zip to the provided directory
+-----------------------------------------------------------------------------*/
+bool WebPagetest::UnzipTo(CString zip_file, CString dest) {
+  bool ret = false;
+  unzFile zip_file_handle = unzOpen(CT2A(zip_file));
+  if (zip_file_handle) {
+    if (unzGoToFirstFile(zip_file_handle) == UNZ_OK) {
+      CStringA dir = CStringA(CT2A(dest)) + "\\";
+      DWORD len = 4096;
+      LPBYTE buff = (LPBYTE)malloc(len);
+      if (buff) {
+        ret = true;
+        do {
+          char file_name[MAX_PATH];
+          unz_file_info info;
+          if (unzGetCurrentFileInfo(zip_file_handle, &info, (char *)&file_name,
+              _countof(file_name), 0, 0, 0, 0) == UNZ_OK) {
+              CStringA dest_file_name = dir + file_name;
+
+            // make sure the directory exists
+            char szDir[MAX_PATH];
+            lstrcpyA(szDir, (LPCSTR)dest_file_name);
+            *PathFindFileNameA(szDir) = 0;
+            if( lstrlenA(szDir) > 3 )
+              SHCreateDirectoryExA(NULL, szDir, NULL);
+
+            HANDLE dest_file = CreateFileA(dest_file_name, GENERIC_WRITE, 0, 
+                                          NULL, CREATE_ALWAYS, 0, 0);
+            if (dest_file != INVALID_HANDLE_VALUE) {
+              if (unzOpenCurrentFile(zip_file_handle) == UNZ_OK) {
+                int bytes = 0;
+                DWORD written;
+                do {
+                  bytes = unzReadCurrentFile(zip_file_handle, buff, len);
+                  if( bytes > 0 )
+                    WriteFile(dest_file, buff, bytes, &written, 0);
+                } while( bytes > 0 );
+                unzCloseCurrentFile(zip_file_handle);
+              } else
+                ret = false;
+              CloseHandle( dest_file );
+            } else
+              ret = false;
+          }
+        } while (ret && unzGoToNextFile(zip_file_handle) == UNZ_OK);
+
+        free(buff);
+      }
+    }
+    unzClose(zip_file_handle);
+  }
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+  Update our list of DNS servers
+-----------------------------------------------------------------------------*/
+void WebPagetest::UpdateDNSServers() {
+  DWORD len = 15000;
+  _dns_servers.Empty();
+  PIP_ADAPTER_ADDRESSES addresses = (PIP_ADAPTER_ADDRESSES)malloc(len);
+  if (addresses) {
+    DWORD ret = GetAdaptersAddresses(AF_INET,
+                                     GAA_FLAG_SKIP_ANYCAST |
+                                     GAA_FLAG_SKIP_FRIENDLY_NAME |
+                                     GAA_FLAG_SKIP_MULTICAST,
+                                     NULL, addresses, &len);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+      addresses = (PIP_ADAPTER_ADDRESSES)realloc(addresses, len);
+      if (addresses)
+        ret = GetAdaptersAddresses(AF_INET,
+                                   GAA_FLAG_SKIP_ANYCAST |
+                                   GAA_FLAG_SKIP_FRIENDLY_NAME |
+                                   GAA_FLAG_SKIP_MULTICAST,
+                                   NULL, addresses, &len);
+    }
+    if (ret == NO_ERROR) {
+      CString buff;
+      for (PIP_ADAPTER_ADDRESSES address = addresses;
+           address != NULL;
+           address = address->Next) {
+        if (address->OperStatus == IfOperStatusUp) {
+          for (PIP_ADAPTER_DNS_SERVER_ADDRESS_XP dns =
+              address->FirstDnsServerAddress;
+              dns != NULL;
+              dns = dns->Next) {
+            if (dns->Address.iSockaddrLength >= sizeof(struct sockaddr_in) &&
+                dns->Address.lpSockaddr->sa_family == AF_INET) {
+              struct sockaddr_in* addr = 
+                  (struct sockaddr_in *)dns->Address.lpSockaddr;
+              buff.Format(_T("%d.%d.%d.%d"),
+                          addr->sin_addr.S_un.S_un_b.s_b1,
+                          addr->sin_addr.S_un.S_un_b.s_b2,
+                          addr->sin_addr.S_un.S_un_b.s_b3,
+                          addr->sin_addr.S_un.S_un_b.s_b4);
+              if (!_dns_servers.IsEmpty())
+                _dns_servers += "-";
+              _dns_servers += buff;
+            }
+          }
+        }
+      }
+    }
+    if (addresses)
+      free(addresses);
+  }
 }

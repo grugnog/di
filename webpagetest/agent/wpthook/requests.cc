@@ -67,8 +67,6 @@ void Requests::Reset() {
     delete _requests.RemoveHead();
   browser_request_data_.RemoveAll();
   LeaveCriticalSection(&cs);
-  _sockets.Reset();
-  _dns.Reset();
 }
 
 /*-----------------------------------------------------------------------------
@@ -226,8 +224,10 @@ Request * Requests::GetOrCreateRequest(DWORD socket_id,
 Request * Requests::NewRequest(DWORD socket_id, bool is_spdy) {
   Request * request = new Request(_test_state, socket_id, _sockets, _dns,
                                   _test, is_spdy, *this);
+  EnterCriticalSection(&cs);
   _active_requests.SetAt(socket_id, request);
   _requests.AddTail(request);
+  LeaveCriticalSection(&cs);
   return request;
 }
 
@@ -252,7 +252,7 @@ void Requests::ProcessBrowserRequest(CString request_data) {
   long  dns_start = -1, dns_end = -1, connect_start = -1, connect_end = -1,
         ssl_start = -1, ssl_end = -1, send_start = -1, send_end = -1,
         headers_end = -1, connection = 0, error_code = 0, 
-        status = 0;
+        status = 0, bytes_in = 0;
   LARGE_INTEGER now;
   QueryPerformanceCounter(&now);
   bool processing_values = true;
@@ -267,58 +267,58 @@ void Requests::ProcessBrowserRequest(CString request_data) {
         processing_values = false;
         processing_request = false;
         processing_response = false;
-        if (!line.Compare(_T("[Request Headers]"))) {
+        if (!line.Compare(_T("[Request Headers]")))
           processing_request = true;
-        } else if (!line.Compare(_T("[Response Headers]"))) {
+        else if (!line.Compare(_T("[Response Headers]")))
           processing_response = true;
-        }
       } else if (processing_values) {
         int separator = line.Find(_T('='));
         if (separator > 0) {
           CString key = line.Left(separator).Trim();
           CString value = line.Mid(separator + 1).Trim();
           if (key.GetLength() && value.GetLength()) {
-            if (!key.CompareNoCase(_T("browser"))) {
+            if (!key.CompareNoCase(_T("browser")))
               browser = value;
-            } else if (!key.CompareNoCase(_T("url"))) {
+            else if (!key.CompareNoCase(_T("url")))
               url = value;
-            } else if (!key.CompareNoCase(_T("errorCode"))) {
+            else if (!key.CompareNoCase(_T("errorCode")))
               error_code = _ttol(value);
-            } else if (!key.CompareNoCase(_T("startTime"))) {
+            else if (!key.CompareNoCase(_T("startTime")))
               start_time = _ttof(value) * 1000.0;
-            } else if (!key.CompareNoCase(_T("firstByteTime"))) {
+            else if (!key.CompareNoCase(_T("firstByteTime")))
               first_byte = _ttof(value) * 1000.0;
-            } else if (!key.CompareNoCase(_T("endTime"))) {
+            else if (!key.CompareNoCase(_T("endTime")))
               end_time = _ttof(value) * 1000.0;
-            } else if (!key.CompareNoCase(_T("initiatorUrl"))) {
+            else if (!key.CompareNoCase(_T("bytesIn")))
+              bytes_in = _ttol(value);
+            else if (!key.CompareNoCase(_T("initiatorUrl")))
               initiator = value;
-            } else if (!key.CompareNoCase(_T("initiatorLineNumber"))) {
+            else if (!key.CompareNoCase(_T("initiatorLineNumber")))
               initiator_line = value;
-            } else if (!key.CompareNoCase(_T("initiatorColumnNumber"))) {
+            else if (!key.CompareNoCase(_T("initiatorColumnNumber")))
               initiator_column = value;
-            } else if (!key.CompareNoCase(_T("status"))) {
+            else if (!key.CompareNoCase(_T("status")))
               status = _ttol(value);
-            } else if (!key.CompareNoCase(_T("connectionId"))) {
+            else if (!key.CompareNoCase(_T("connectionId")))
               connection = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.dnsStart"))) {
+            else if (!key.CompareNoCase(_T("timing.dnsStart")))
               dns_start = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.dnsEnd"))) {
+            else if (!key.CompareNoCase(_T("timing.dnsEnd")))
               dns_end = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.connectStart"))) {
+            else if (!key.CompareNoCase(_T("timing.connectStart")))
               connect_start = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.connectEnd"))) {
+            else if (!key.CompareNoCase(_T("timing.connectEnd")))
               connect_end = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.sslStart"))) {
+            else if (!key.CompareNoCase(_T("timing.sslStart")))
               ssl_start = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.sslEnd"))) {
+            else if (!key.CompareNoCase(_T("timing.sslEnd")))
               ssl_end = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.sendStart"))) {
+            else if (!key.CompareNoCase(_T("timing.sendStart")))
               send_start = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.sendEnd"))) {
+            else if (!key.CompareNoCase(_T("timing.sendEnd")))
               send_end = _ttol(value);
-            } else if (!key.CompareNoCase(_T("timing.receiveHeadersEnd"))) {
+            else if (!key.CompareNoCase(_T("timing.receiveHeadersEnd")))
               headers_end = _ttol(value);
-            }
           }
         }
       } else if (processing_request) {
@@ -338,23 +338,26 @@ void Requests::ProcessBrowserRequest(CString request_data) {
     browser_request_data_.AddTail(data);
     LeaveCriticalSection(&cs);
   }
-  if (!url.Left(6).Compare(_T("https:")) &&
-      end_time > 0 && start_time > 0) {
-    // Add SSL requests as native request objects
+  _test_state.ActivityDetected();
+  if (end_time > 0 && start_time > 0) {
     Request * request = new Request(_test_state, connection, _sockets, _dns,
                                     _test, false, *this);
     request->_from_browser = true;
     request->initiator_ = initiator;
     request->initiator_line_ = initiator_line;
     request->initiator_column_ = initiator_column;
+    request->_bytes_in = bytes_in;
 
     bool already_connected = false;
     if (connection) {
       connections_.Lookup(connection, already_connected);
       connections_.SetAt(connection, true);
     }
+    if (!url.Left(6).Compare(_T("https:")))
+      request->_is_ssl = true;
+    else
+      request->_is_ssl = false;
     // figure out the conversion from browser time to perf counter
-    request->_is_ssl = true;
     LONGLONG ms_freq = _test_state._ms_frequency.QuadPart;
     request->_end.QuadPart = now.QuadPart;
     request->_start.QuadPart = now.QuadPart - 
@@ -394,9 +397,40 @@ void Requests::ProcessBrowserRequest(CString request_data) {
       DataChunk chunk((LPCSTR)response_headers, response_headers.GetLength());
       request->_response_data.AddChunk(chunk);
     }
-    EnterCriticalSection(&cs);
-    _requests.AddTail(request);
-    LeaveCriticalSection(&cs);
+
+    // Do a sanity check and throw out any requests that have bogus timings.
+    // Chrome bug: https://code.google.com/p/chromium/issues/detail?id=309570
+    LONGLONG slop = _test_state._ms_frequency.QuadPart * 10000;
+    LARGE_INTEGER earliest, latest;
+    earliest.QuadPart = _test_state._start.QuadPart - slop;
+    latest.QuadPart = now.QuadPart + slop;
+    if (request->_start.QuadPart > earliest.QuadPart &&
+        request->_end.QuadPart < latest.QuadPart &&
+        (!request->_first_byte.QuadPart ||
+         (request->_first_byte.QuadPart > earliest.QuadPart &&
+          request->_first_byte.QuadPart < latest.QuadPart)) &&
+        (!request->_connect_start.QuadPart ||
+         (request->_connect_start.QuadPart > earliest.QuadPart &&
+          request->_connect_start.QuadPart < latest.QuadPart)) &&
+        (!request->_connect_end.QuadPart ||
+         (request->_connect_end.QuadPart > earliest.QuadPart &&
+          request->_connect_end.QuadPart < latest.QuadPart)) &&
+        (!request->_dns_start.QuadPart ||
+         (request->_dns_start.QuadPart > earliest.QuadPart &&
+          request->_dns_start.QuadPart < latest.QuadPart)) &&
+        (!request->_dns_end.QuadPart ||
+         (request->_dns_end.QuadPart > earliest.QuadPart &&
+          request->_dns_end.QuadPart < latest.QuadPart)) &&
+        (!request->_ssl_start.QuadPart ||
+         (request->_ssl_start.QuadPart > earliest.QuadPart &&
+          request->_ssl_start.QuadPart < latest.QuadPart)) &&
+        (!request->_ssl_end.QuadPart ||
+         (request->_ssl_end.QuadPart > earliest.QuadPart &&
+          request->_ssl_end.QuadPart < latest.QuadPart))) {
+      EnterCriticalSection(&cs);
+      _requests.AddTail(request);
+      LeaveCriticalSection(&cs);
+    }
   }
 }
 

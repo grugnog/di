@@ -34,7 +34,7 @@ STDMETHODIMP_(void) WptBHO::OnBeforeNavigate2(IDispatch *pDisp, VARIANT * vUrl,
   if (vUrl)
     url = *vUrl;
 
-  AtlTrace(CString(_T("[WptBHO] OnBeforeNavigate2 - ")) + url);
+  AtlTrace(_T("[WptBHO] OnBeforeNavigate2 - %s"), url);
   CComPtr<IUnknown> unknown_browser = _web_browser;
   CComPtr<IUnknown> unknown_frame = pDisp;
   if (unknown_browser && unknown_frame && unknown_browser == unknown_frame) {
@@ -82,7 +82,7 @@ STDMETHODIMP_(void) WptBHO::OnNavigateError(IDispatch *pDisp, VARIANT *vUrl,
     CString buff;
     buff.Format(_T("[WptBHO] - NavigateError (%d): "), code);
     AtlTrace(buff + url);
-    _wpt.OnLoad();
+    _wpt.OnNavigateError(code);
   }
 }
 

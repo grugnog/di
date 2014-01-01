@@ -67,25 +67,37 @@ public:
     name_ = src.name_;
     addresses_.RemoveAll();
     POSITION pos = src.addresses_.GetHeadPosition();
-    while (pos) {
+    while (pos)
       addresses_.AddTail(src.addresses_.GetNext(pos));
-    }
     return src;
   }
   void AddAddress(DWORD address){
     bool found = false;
     POSITION pos = addresses_.GetHeadPosition();
     while (pos && !found) {
-      if (address == addresses_.GetNext(pos)) {
+      if (address == addresses_.GetNext(pos))
         found = true;
-      }
     }
-    if (!found) {
+    if (!found)
       addresses_.AddTail(address);
-    }
   }
   CString          name_;
   CAtlList<DWORD>  addresses_;
+};
+
+class CDNEntry {
+public:
+  CDNEntry(void){}
+  CDNEntry(const CDNEntry& src){ *this = src; }
+  ~CDNEntry(void){}
+  const CDNEntry& operator =(const CDNEntry& src) {
+    _name = src._name;
+    _provider = src._provider;
+    return src;
+  }
+  
+  CStringA _name;
+  CStringA _provider;
 };
 
 class TrackDns {
@@ -95,6 +107,7 @@ public:
 
   void * LookupStart(CString& name);
   void LookupAddress(void * context, ULONG &addr);
+  void LookupAlias(CString name, CString alias);
   void LookupDone(void * context, int result);
   void Reset();
   bool Claim(CString name, ULONG addr, LARGE_INTEGER before,
@@ -102,6 +115,7 @@ public:
   LONGLONG  GetEarliest(LONGLONG& after);
   void AddAddress(CString host, DWORD address);
   int GetAddressCount(CString host);
+  CStringA GetCDNProvider(CString host);
 
   CAtlMap<void *, DnsInfo *>  _dns_lookups;
   CAtlMap<ULONG, CString>     _dns_hosts;
@@ -109,7 +123,9 @@ public:
   TestState&                  _test_state;
   WptTest&                    _test;
   CAtlList<DnsHostAddresses>  _host_addresses;
+  CAtlList<CDNEntry>          _cdn_hosts;
 
 private:
+  void CheckCDN(CString host, CString name);
   CString GetHost(ULONG addr);
 };

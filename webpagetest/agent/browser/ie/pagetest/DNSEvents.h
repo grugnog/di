@@ -67,13 +67,14 @@ class CDNSEvents :
 public:
 	CDNSEvents(void);
 	virtual ~CDNSEvents(void);
-	DWORD	bindAddr;
   CAtlList<DnsHostAddresses>  _host_addresses;
 
 	virtual bool DnsLookupStart(CString & name, void *&context, CAtlArray<DWORD> &addresses);
 	virtual void DnsLookupAddress(void * context, struct in_addr& address);
+  virtual void DnsLookupAlias(CString host, CString alias);
 	virtual void DnsLookupDone(void * context);
 	virtual void DnsLookup(CString & name, void *&context, CAtlArray<DWORD> &addresses);
   virtual void AddAddress(CString host, DWORD address);
   virtual int GetAddressCount(CString host);
+  virtual void DnsCheckCDN(CString host, CString name);
 };

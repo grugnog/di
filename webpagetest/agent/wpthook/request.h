@@ -179,6 +179,7 @@ public:
     , _cache_time_secs(-1)
     , _combine_score(-1)
     , _static_cdn_score(-1)
+    , _jpeg_scans(0)
   {}
   ~OptimizationScores() {}
   int _keep_alive_score;
@@ -192,6 +193,7 @@ public:
   DWORD _cache_time_secs;
   int _combine_score;
   int _static_cdn_score;
+  int _jpeg_scans;
   CStringA _cdn_provider;
 };
 
@@ -243,6 +245,7 @@ public:
   bool  _reported;
   DWORD _socket_id;
   ULONG _peer_address;
+  int   _local_port;
   bool  _is_ssl;
   bool  _is_spdy;
   CString initiator_;
@@ -266,6 +269,10 @@ public:
   bool _from_browser;
   bool _is_base_page;
   CStringA  rtt_;
+
+  // byte counts
+  DWORD _bytes_in;
+  DWORD _bytes_out;
 
   // performance counter times
   LARGE_INTEGER _start;

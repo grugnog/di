@@ -226,6 +226,9 @@ SOCKET CWsHook::WSASocketW(int af, int type, int protocol, LPWSAPROTOCOL_INFOW l
 			dlg->NewSocket(ret);
 	}
 
+    if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
+
 	return ret;
 }
 
@@ -240,6 +243,9 @@ int CWsHook::closesocket(SOCKET s)
 
 	if( _closesocket )
 		ret = _closesocket(s);
+
+    if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
 
 	return ret;
 }
@@ -263,6 +269,9 @@ int CWsHook::connect(IN SOCKET s, const struct sockaddr FAR * name, IN int namel
     dlg->SocketConnected(s);
   }
 
+    if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
+
 	return ret;
 }
 
@@ -282,6 +291,9 @@ int	CWsHook::bind(SOCKET s, const struct sockaddr FAR * name, IN int namelen)
 	if( _bind )
 		ret = _bind(s, name, namelen);
 
+    if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
+
 	return ret;
 }
 
@@ -291,10 +303,16 @@ int	CWsHook::recv(SOCKET s, char FAR * buf, int len, int flags)
 {
 	int ret = SOCKET_ERROR;
 
+	if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
+
 	if( _recv )
 		ret = _recv(s, buf, len, flags);
 
-	if( ret > 0 )
+	void * sid = NULL;
+	if (dlg)
+		sid = dlg->GetSchannelId(s);
+	if( !sid && dlg && ret > 0 )
 		dlg->SocketRecv(s, ret, (LPBYTE)buf );
 
 	return ret;
@@ -306,10 +324,16 @@ int	CWsHook::WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD 
 {
 	int ret = SOCKET_ERROR;
 
+	if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
+
 	if( _WSARecv )
 		ret = _WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine);
 
-	if( ret != SOCKET_ERROR && lpBuffers && dwBufferCount && lpNumberOfBytesRecvd && *lpNumberOfBytesRecvd && !lpOverlapped && !lpCompletionRoutine )
+	void * sid = NULL;
+	if (dlg)
+		sid = dlg->GetSchannelId(s);
+	if( !sid && dlg && ret != SOCKET_ERROR && lpBuffers && dwBufferCount && lpNumberOfBytesRecvd && *lpNumberOfBytesRecvd && !lpOverlapped && !lpCompletionRoutine )
 	{
 		DWORD bytes = *lpNumberOfBytesRecvd;
 		DWORD i = 0;
@@ -335,7 +359,19 @@ int	CWsHook::send(SOCKET s, const char FAR * buf, int len, int flags)
 {
 	int ret = SOCKET_ERROR;
 
-	if( dlg && len )
+	if (dlg && tlsIndex != TLS_OUT_OF_INDEXES) {
+      void * schannelId = TlsGetValue(tlsIndex);
+	  if (schannelId) {
+		  dlg->MapSchannelSocket(schannelId, s);
+	  }
+	}
+    if (tlsIndex != TLS_OUT_OF_INDEXES)
+      TlsSetValue(tlsIndex, 0);
+
+	void * sid = NULL;
+	if (dlg)
+		sid = dlg->GetSchannelId(s);
+	if( dlg && len && !sid )
 		dlg->SocketSend(s, len, (LPBYTE)buf );
 
 	if( _send )
@@ -364,19 +400,16 @@ int	CWsHook::getaddrinfo(PCSTR pNodeName, PCSTR pServiceName, const ADDRINFOA * 
 
 	if( _getaddrinfo && !overrideDNS )
 		ret = _getaddrinfo(CT2A((LPCTSTR)name), pServiceName, pHints, ppResult);
-	else if( overrideDNS )
-	{
+	else if( overrideDNS ) {
 		if( addresses.IsEmpty() )
 			ret = EAI_NONAME;
-		else
-		{
+		else {
 			// build the response structure with the addresses we looked up
 			ret = 0;
 			DWORD count = addresses.GetCount();
 
 			ADDRINFOA_ADDR * result = (ADDRINFOA_ADDR *)malloc(sizeof(ADDRINFOA_ADDR) * count);
-			for( DWORD i = 0; i < count; i++ )
-			{
+			for (DWORD i = 0; i < count; i++) {
 				memset( &result[i], 0, sizeof(ADDRINFOA_ADDR) );
 				result->info.ai_family = AF_INET;
 				result->info.ai_addrlen = sizeof(struct sockaddr_in);
@@ -392,13 +425,15 @@ int	CWsHook::getaddrinfo(PCSTR pNodeName, PCSTR pServiceName, const ADDRINFOA * 
 		}
 	}
 
-	if( !ret && dlg && context )
-	{
+	if (!ret && dlg) {
 		PADDRINFOA addr = *ppResult;
-		while( addr )
-		{
-			if( addr->ai_addrlen >= sizeof(struct sockaddr_in) && addr->ai_family == AF_INET )
-			{
+		while (addr) {
+      if (addr->ai_canonname)
+        dlg->DnsLookupAlias(name, (LPCTSTR)CA2T(addr->ai_canonname));
+
+			if (context &&
+          addr->ai_addrlen >= sizeof(struct sockaddr_in) && 
+          addr->ai_family == AF_INET) {
 				struct sockaddr_in * ipName = (struct sockaddr_in *)addr->ai_addr;
 				dlg->DnsLookupAddress(context, ipName->sin_addr);
 			}
@@ -406,7 +441,8 @@ int	CWsHook::getaddrinfo(PCSTR pNodeName, PCSTR pServiceName, const ADDRINFOA * 
 			addr = addr->ai_next;
 		}
 
-		dlg->DnsLookupDone(context);
+    if (context)
+		  dlg->DnsLookupDone(context);
 	}
 
 	return ret;
@@ -432,19 +468,16 @@ int	CWsHook::GetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName, const ADDRINFOW
 
 	if( _GetAddrInfoW && !overrideDNS )
 		ret = _GetAddrInfoW(CT2W((LPCWSTR)name), pServiceName, pHints, ppResult);
-	else if( overrideDNS )
-	{
+	else if( overrideDNS ) {
 		if( addresses.IsEmpty() )
 			ret = EAI_NONAME;
-		else
-		{
+		else {
 			// build the response structure with the addresses we looked up
 			ret = 0;
 			DWORD count = addresses.GetCount();
 
 			ADDRINFOW_ADDR * result = (ADDRINFOW_ADDR *)malloc(sizeof(ADDRINFOW_ADDR) * count);
-			for( DWORD i = 0; i < count; i++ )
-			{
+			for (DWORD i = 0; i < count; i++) {
 				memset( &result[i], 0, sizeof(ADDRINFOW_ADDR) );
 				result->info.ai_family = AF_INET;
 				result->info.ai_addrlen = sizeof(struct sockaddr_in);
@@ -460,21 +493,24 @@ int	CWsHook::GetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName, const ADDRINFOW
 		}
 	}
 
-	if( !ret && dlg && context )
-	{
+	if (!ret && dlg) {
 		PADDRINFOW addr = *ppResult;
-		while( addr )
-		{
-			if( addr->ai_addrlen >= sizeof(struct sockaddr_in) && addr->ai_family == AF_INET )
-			{
+		while (addr) {
+      if (addr->ai_canonname)
+        dlg->DnsLookupAlias(name, addr->ai_canonname);
+
+      if (context && 
+          addr->ai_addrlen >= sizeof(struct sockaddr_in) &&
+          addr->ai_family == AF_INET ) {
 				struct sockaddr_in * ipName = (struct sockaddr_in *)addr->ai_addr;
 				dlg->DnsLookupAddress(context, ipName->sin_addr);
 			}
 
 			addr = addr->ai_next;
 		}
-
-		dlg->DnsLookupDone(context);
+    
+    if (context)
+		  dlg->DnsLookupDone(context);
 	}
 
 	return ret;

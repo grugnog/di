@@ -25,18 +25,16 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
-/*global after:true, describe:true, before:true, beforeEach:true,
-  afterEach:true, it:true*/
 
 var agent_main = require('agent_main');
 var events = require('events');
+var fs = require('fs');
 var process_utils = require('process_utils');
 var should = require('should');
 var sinon = require('sinon');
 var test_utils = require('./test_utils.js');
 var util = require('util');
-var webdriver = require('webdriver');
-var wpt_client = require('wpt_client');
+var webdriver = require('selenium-webdriver');
 
 
 function FakeEmitterWithRun() {
@@ -44,6 +42,7 @@ function FakeEmitterWithRun() {
 }
 util.inherits(FakeEmitterWithRun, events.EventEmitter);
 
+/** Fake emitter. */
 FakeEmitterWithRun.prototype.run = function() {
   'use strict';
 };
@@ -59,10 +58,8 @@ FakeEmitterWithRun.prototype.run = function() {
 describe('agent_main', function() {
   'use strict';
 
-  var app = webdriver.promise.Application.getInstance();
-  process_utils.injectWdAppLogging('wd_server app', app);
-
   var sandbox;
+  var app;
 
   before(function() {
     agent_main.setSystemCommands();
@@ -72,17 +69,37 @@ describe('agent_main', function() {
     sandbox = sinon.sandbox.create();
     test_utils.fakeTimers(sandbox);
 
-    sandbox.stub(process_utils, 'scheduleExec', function() {
-      return new webdriver.promise.Deferred();
+    // Stub out fs functions for the temp dir cleanup and ipfw check.
+    sandbox.stub(fs, 'exists', function(path, cb) {
+      path.should.match(/ipfw$|runtmp$/);
+      global.setTimeout(function() {
+        cb(/runtmp$/.test(path));
+      }, 1);
     });
-    sandbox.stub(process_utils, 'scheduleExitWaitOrKill', function() {
-      return new webdriver.promise.Deferred();
+    sandbox.stub(fs, 'readdir', function(path, cb) {
+      path.should.match(/runtmp$/);
+      global.setTimeout(function() {
+        cb(undefined, ['tmp1', 'tmp2']);
+      }, 1);
     });
-    sandbox.stub(process_utils, 'killDanglingProcesses', function(callback) {
-      callback();
+    sandbox.stub(fs, 'unlink', function(path, cb) {
+      path.should.match(/runtmp[\/\\]tmp\d$/);
+      global.setTimeout(function() {
+        cb();
+      }, 1);
     });
 
-    app.reset();  // We reuse the app across tests, clean it up.
+    ['scheduleExec', 'scheduleWait', 'scheduleGetAll',
+         'scheduleAllocatePort'].forEach(function(functionName) {
+      sandbox.stub(process_utils, functionName, function() {
+        return new webdriver.promise.Deferred();
+      });
+    });
+
+    // Create a new ControlFlow for each test.
+    app = new webdriver.promise.ControlFlow();
+    webdriver.promise.setDefaultFlow(app);
+    process_utils.injectWdAppLogging('agent_main', app);
   });
 
   afterEach(function() {
@@ -98,34 +115,8 @@ describe('agent_main', function() {
     var agent = new agent_main.Agent(client, /*flags=*/{});
     agent.run();
 
-    client.onJobTimeout(fakeJob);
-    sandbox.clock.tick(webdriver.promise.Application.EVENT_LOOP_FREQUENCY * 5);
+    client.onAbortJob(fakeJob);
+    test_utils.tickUntilIdle(app, sandbox);
     should.ok(runFinishedSpy.calledOnce);
-  });
-
-  it('should require selenium jar and devtools2har jar', function() {
-    sandbox.stub(agent_main, 'Agent', FakeEmitterWithRun);
-    sandbox.spy(FakeEmitterWithRun.prototype, 'run');
-    sandbox.stub(wpt_client, 'Client', FakeEmitterWithRun);
-
-    var flags = {};
-    var runMainWithFlags = function() {
-      agent_main.main(flags);
-    };
-
-    runMainWithFlags.should.throwError();
-
-    flags.selenium_jar = 'jar';
-    runMainWithFlags.should.throwError();
-
-    flags.selenium_jar = undefined;
-    flags.devtools2har_jar = 'jar';
-    runMainWithFlags.should.throwError();
-
-    flags.selenium_jar = 'jar';
-
-    should.ok(!FakeEmitterWithRun.prototype.run.called);
-    agent_main.main(flags);
-    should.ok(FakeEmitterWithRun.prototype.run.calledOnce);
   });
 });

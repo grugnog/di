@@ -6,6 +6,8 @@
 #define MSG_UPDATE_UI (WM_APP + 1)
 #define MSG_CONTINUE_STARTUP (WM_APP + 2)
 
+class CurlBlastDlg;
+
 class CSpeed
 {
 public:
@@ -29,7 +31,7 @@ public:
 class CURLBlaster
 {
 public:
-	CURLBlaster(HWND hWnd, CLog &logRef, CIpfw &ipfwRef, HANDLE &testingMutexRef);
+	CURLBlaster(HWND hWnd, CLog &logRef, CIpfw &ipfwRef, HANDLE &testingMutexRef, CurlBlastDlg &dlgRef);
 	~CURLBlaster(void);
 	bool Start(int userIndex);
 	void Stop(void);
@@ -48,20 +50,10 @@ public:
 
 	CString errorLog;
 	CUrlManager * urlManager;
-	int testType;
-	DWORD labID;
-	DWORD dialerID;
-	DWORD connectionType;
 	DWORD timeout;
-	CString ipAddress;
-	DWORD experimental;
 	CRect pos;
-	DWORD sequentialErrors;
-	HANDLE	hClearedCache;
-	HANDLE	hRun;
 	CRect	desktop;
 	CString customEventText;
-	DWORD screenShotErrors;
 	CTestInfo info;
 	CString preLaunch;
 	CString postLaunch;
@@ -75,7 +67,6 @@ public:
 	CRITICAL_SECTION cs;
 	DWORD browserPID;
 	PSID userSID;
-
 
 protected:
 	bool DoUserLogon(void);
@@ -99,6 +90,7 @@ protected:
   HANDLE &testingMutex;
   CString heartbeatEventName;
   HANDLE  heartbeatEvent;
+  CurlBlastDlg &dlg;
 	
 	// directories
 	CString	profile;
@@ -112,6 +104,7 @@ protected:
   CString domStorage;
 	CString desktopPath;
 	CString windir;
+	CString webCache;
 
   bool Launch(CString cmd, HANDLE * phProc = NULL);
 	void LaunchDynaTrace();

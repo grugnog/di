@@ -31,6 +31,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "track_sockets.h"
 #include "requests.h"
 #include "test_state.h"
+#include "../wptdriver/wpt_test.h"
 
 const DWORD LOCALHOST = 0x0100007F; // 127.0.0.1
 
@@ -42,10 +43,12 @@ bool SocketInfo::IsLocalhost() {
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-TrackSockets::TrackSockets(Requests& requests, TestState& test_state):
+TrackSockets::TrackSockets(Requests& requests,
+    TestState& test_state, WptTest& test):
   _nextSocketId(1)
   , _requests(requests)
-  , _test_state(test_state) {
+  , _test_state(test_state)
+  , _test(test) {
   InitializeCriticalSection(&cs);
   _openSockets.InitHashTable(257);
   _socketInfo.InitHashTable(257);
@@ -95,46 +98,66 @@ void TrackSockets::Connect(SOCKET s, const struct sockaddr FAR * name,
   }
   if (namelen >= sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
     struct sockaddr_in* ip_name = (struct sockaddr_in *)name;
+    bool localhost = false;
 
     EnterCriticalSection(&cs);
     SocketInfo* info = GetSocketInfo(s, false);
     memcpy(&info->_addr, ip_name, sizeof(struct sockaddr_in));
     QueryPerformanceCounter(&info->_connect_start);
-    if (!info->IsLocalhost()) {
+    localhost = info->IsLocalhost();
+    LeaveCriticalSection(&cs);
+
+    if (!localhost) {
+      _test.OverridePort(name, namelen);
       _test_state.ActivityDetected();
     }
-    LeaveCriticalSection(&cs);
   }
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void TrackSockets::Connected(SOCKET s) {
-  WptTrace(loglevel::kFunction, 
-            _T("[wpthook] - TrackSockets::Connected(%d)\n"), s);
-  EnterCriticalSection(&cs);
-  SocketInfo* info = GetSocketInfo(s);
-  QueryPerformanceCounter(&info->_connect_end);
-  if (info->_connect_start.QuadPart && 
-      info->_connect_end.QuadPart && 
-      info->_connect_end.QuadPart >= info->_connect_start.QuadPart) {
-    DWORD elapsed = (DWORD)((info->_connect_end.QuadPart - 
-                             info->_connect_start.QuadPart) / 
-                             _test_state._ms_frequency.QuadPart);
-    DWORD addr = info->_addr.sin_addr.S_un.S_addr;
-    DWORD ms = -1;
-    if (ipv4_rtt_.Lookup(addr, ms)) {
-      if (elapsed < ms) {
+  DWORD socket_id = 0;
+  _openSockets.Lookup(s, socket_id);
+  if (socket_id) {
+    bool localhost = false;
+    struct sockaddr_in client;
+    int addrlen = sizeof(client);
+    int local_port = 0;
+    if(getsockname(s, (struct sockaddr *)&client, &addrlen) == 0 &&
+        client.sin_family == AF_INET &&
+        addrlen == sizeof(client))
+      local_port = ntohs(client.sin_port);
+
+    WptTrace(loglevel::kFunction, 
+              _T("[wpthook] - TrackSockets::Connected(%d) - Client port: %d\n"),
+                 s, local_port);
+
+    EnterCriticalSection(&cs);
+    SocketInfo* info = GetSocketInfo(s);
+    QueryPerformanceCounter(&info->_connect_end);
+    if (info->_connect_start.QuadPart && 
+        info->_connect_end.QuadPart && 
+        info->_connect_end.QuadPart >= info->_connect_start.QuadPart) {
+      DWORD elapsed = (DWORD)((info->_connect_end.QuadPart - 
+                               info->_connect_start.QuadPart) / 
+                               _test_state._ms_frequency.QuadPart);
+      DWORD addr = info->_addr.sin_addr.S_un.S_addr;
+      DWORD ms = -1;
+      if (ipv4_rtt_.Lookup(addr, ms)) {
+        if (elapsed < ms)
+          ipv4_rtt_.SetAt(addr, elapsed);
+      } else {
         ipv4_rtt_.SetAt(addr, elapsed);
       }
-    } else {
-      ipv4_rtt_.SetAt(addr, elapsed);
     }
+    info->_local_port = local_port;
+    localhost = info->IsLocalhost();
+    LeaveCriticalSection(&cs);
+
+    if (!localhost)
+      _test_state.ActivityDetected();
   }
-  if (!info->IsLocalhost()) {
-    _test_state.ActivityDetected();
-  }
-  LeaveCriticalSection(&cs);
 }
 
 /*-----------------------------------------------------------------------------
@@ -165,6 +188,11 @@ void TrackSockets::DataOut(SOCKET s, DataChunk& chunk, bool is_unencrypted) {
   }
   DWORD socket_id = info->_id;
   if (!info->IsLocalhost()) {
+    if (_test_state._active && !is_unencrypted) {
+      _test_state._bytes_out += chunk.GetLength();
+      if (!_test_state._on_load.QuadPart)
+        _test_state._doc_bytes_out += chunk.GetLength();
+    }
     if (is_unencrypted || !info->_is_ssl) {
       _requests.DataOut(socket_id, chunk);
     } else {
@@ -183,8 +211,11 @@ void TrackSockets::DataIn(SOCKET s, DataChunk& chunk, bool is_unencrypted) {
   SocketInfo* info = GetSocketInfo(s);
   DWORD socket_id = info->_id;
   if (!info->IsLocalhost()) {
-    if (_test_state._active) {
+    if (_test_state._active && !is_unencrypted) {
       _test_state._bytes_in_bandwidth += chunk.GetLength();
+      _test_state._bytes_in += chunk.GetLength();
+      if (!_test_state._on_load.QuadPart)
+        _test_state._doc_bytes_in += chunk.GetLength();
     }
     if (is_unencrypted || !info->_is_ssl) {
       _requests.DataIn(socket_id, chunk);
@@ -243,11 +274,22 @@ ULONG TrackSockets::GetPeerAddress(DWORD socket_id) {
   ULONG peer_address = 0;
   EnterCriticalSection(&cs);
   SocketInfo * info = NULL;
-  if (_socketInfo.Lookup(socket_id, info) && info) {
+  if (_socketInfo.Lookup(socket_id, info) && info)
     peer_address = info->_addr.sin_addr.S_un.S_addr;
-  }
   LeaveCriticalSection(&cs);
   return peer_address;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+int TrackSockets::GetLocalPort(DWORD socket_id) {
+  int local_port = 0;
+  EnterCriticalSection(&cs);
+  SocketInfo * info = NULL;
+  if (_socketInfo.Lookup(socket_id, info) && info)
+    local_port = info->_local_port;
+  LeaveCriticalSection(&cs);
+  return local_port;
 }
 
 /*-----------------------------------------------------------------------------

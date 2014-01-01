@@ -70,6 +70,16 @@ int WSAAPI connect_Hook(IN SOCKET s, const struct sockaddr FAR * name,
   return ret;
 }
 
+BOOL PASCAL ConnectEx_Hook(SOCKET s, const struct sockaddr FAR *name,
+    int namelen, PVOID lpSendBuffer, DWORD dwSendDataLength,
+    LPDWORD lpdwBytesSent, LPOVERLAPPED lpOverlapped) {
+  BOOL ret = FALSE;
+  if (pHook)
+    pHook->ConnectEx(s, name, namelen, lpSendBuffer, dwSendDataLength,
+                     lpdwBytesSent, lpOverlapped);
+  return ret;
+}
+
 int WSAAPI recv_Hook(SOCKET s, char FAR * buf, int len, int flags) {
   int ret = SOCKET_ERROR;
   if (pHook)
@@ -93,10 +103,11 @@ int WSAAPI send_Hook(SOCKET s, const char FAR * buf, int len, int flags) {
 }
 
 int WSAAPI getaddrinfo_Hook(PCSTR pNodeName, PCSTR pServiceName, 
-                             const ADDRINFOA * pHints, PADDRINFOA * ppResult) {
+                            const ADDRINFOA * pHints, PADDRINFOA * ppResult) {
   int ret = WSAEINVAL;
   if (pHook)
-    ret = pHook->getaddrinfo(pNodeName, pServiceName, pHints, ppResult);
+    ret = pHook->getaddrinfo(pNodeName, pServiceName, 
+                             (ADDRINFOA *)pHints, ppResult);
   return ret;
 }
 
@@ -104,7 +115,8 @@ int WSAAPI GetAddrInfoW_Hook(PCWSTR pNodeName, PCWSTR pServiceName,
                              const ADDRINFOW * pHints, PADDRINFOW * ppResult) {
   int ret = WSAEINVAL;
   if (pHook)
-    ret = pHook->GetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
+    ret = pHook->GetAddrInfoW(pNodeName, pServiceName, 
+                              (ADDRINFOW *)pHints, ppResult);
   return ret;
 }
 
@@ -170,8 +182,8 @@ int WSAAPI GetAddrInfoExA_Hook(PCSTR pName, PCSTR pServiceName, DWORD dwNameSpac
   int ret = EAI_FAIL;
   if (pHook)
     ret = pHook->GetAddrInfoExA(pName, pServiceName, dwNameSpace, lpNspId,
-        hints, ppResult, timeout, lpOverlapped, lpCompletionRoutine,
-        lpNameHandle);
+        (ADDRINFOEXA *)hints, ppResult, timeout, lpOverlapped,
+        lpCompletionRoutine, lpNameHandle);
   return ret;
 }
 
@@ -183,8 +195,38 @@ int WSAAPI GetAddrInfoExW_Hook(PCWSTR pName, PCWSTR pServiceName, DWORD dwNameSp
   int ret = EAI_FAIL;
   if (pHook)
     ret = pHook->GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId,
-        hints, ppResult, timeout, lpOverlapped, lpCompletionRoutine,
-        lpHandle);
+        (ADDRINFOEXW *)hints, ppResult, timeout, lpOverlapped,
+        lpCompletionRoutine, lpHandle);
+  return ret;
+}
+
+PTP_IO WINAPI CreateThreadpoolIo_Hook(HANDLE fl,
+    PTP_WIN32_IO_CALLBACK_WPT pfnio, PVOID pv, PTP_CALLBACK_ENVIRON pcbe) {
+  PTP_IO ret = NULL;
+  if (pHook)
+    ret = pHook->CreateThreadpoolIo(fl, pfnio, pv, pcbe);
+  return ret;
+}
+
+void WINAPI CloseThreadpoolIo_Hook(PTP_IO pio) {
+  if (pHook)
+    pHook->CloseThreadpoolIo(pio);
+}
+
+void WINAPI StartThreadpoolIo_Hook(PTP_IO pio) {
+  if (pHook)
+    pHook->StartThreadpoolIo(pio);
+}
+
+int WSAAPI WSAIoctl_Hook(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer,
+  DWORD cbInBuffer, LPVOID lpvOutBuffer, DWORD cbOutBuffer,
+  LPDWORD lpcbBytesReturned, LPWSAOVERLAPPED lpOverlapped,
+  LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine) {
+  int ret = SOCKET_ERROR;
+  if (pHook)
+    ret = pHook->WSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer,
+                          lpvOutBuffer, cbOutBuffer, lpcbBytesReturned,
+                          lpOverlapped, lpCompletionRoutine);
   return ret;
 }
 
@@ -206,7 +248,10 @@ CWsHook::CWsHook(TrackDns& dns, TrackSockets& sockets, TestState& test_state):
   _recv_buffers.InitHashTable(257);
   _send_buffers.InitHashTable(257);
   _send_buffer_original_length.InitHashTable(257);
+  _threadpool_callbacks.InitHashTable(257);
+  _threadpool_sockets.InitHashTable(257);
   _connecting.InitHashTable(257);
+  _connectex_functions.InitHashTable(257);
   InitializeCriticalSection(&cs);
 }
 
@@ -241,6 +286,22 @@ void CWsHook::Init() {
                                           WSAEventSelect_Hook);
   _WSAEnumNetworkEvents = hook.createHookByName("ws2_32.dll",
       "WSAEnumNetworkEvents", WSAEnumNetworkEvents_Hook);
+  _CreateThreadpoolIo = hook.createHookByName("kernelbase.dll",
+      "CreateThreadpoolIo", CreateThreadpoolIo_Hook);
+  if (!_CreateThreadpoolIo)
+    _CreateThreadpoolIo = hook.createHookByName("kernel32.dll",
+        "CreateThreadpoolIo", CreateThreadpoolIo_Hook);
+  _CloseThreadpoolIo = hook.createHookByName("kernelbase.dll",
+      "CloseThreadpoolIo", CloseThreadpoolIo_Hook);
+  if (!_CloseThreadpoolIo)
+    _CloseThreadpoolIo = hook.createHookByName("kernel32.dll",
+        "CloseThreadpoolIo", CloseThreadpoolIo_Hook);
+  _StartThreadpoolIo = hook.createHookByName("kernelbase.dll",
+      "StartThreadpoolIo", StartThreadpoolIo_Hook);
+  if (!_StartThreadpoolIo)
+    _StartThreadpoolIo = hook.createHookByName("kernel32.dll",
+        "StartThreadpoolIo", StartThreadpoolIo_Hook);
+  _WSAIoctl = hook.createHookByName("ws2_32.dll", "WSAIoctl", WSAIoctl_Hook);
 
   // only hook the A version if the W version wasn't present (XP SP1 or below)
   if (!_GetAddrInfoW)
@@ -254,8 +315,10 @@ CWsHook::~CWsHook(void) {
   if( pHook == this )
     pHook = NULL;
 
+  EnterCriticalSection(&cs);
   _send_buffers.RemoveAll();
   _send_buffer_original_length.RemoveAll();
+  LeaveCriticalSection(&cs);
 
   DeleteCriticalSection(&cs);
 }
@@ -335,11 +398,54 @@ int CWsHook::connect(IN SOCKET s, const struct sockaddr FAR * name,
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
+BOOL CWsHook::ConnectEx(SOCKET s, const struct sockaddr FAR *name, int namelen,
+    PVOID lpSendBuffer, DWORD dwSendDataLength, LPDWORD lpdwBytesSent,
+    LPOVERLAPPED lpOverlapped) {
+#ifdef TRACE_WINSOCK
+  if (namelen >= sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
+    struct sockaddr_in* ip_name = (struct sockaddr_in *)name;
+    ATLTRACE(_T("%d - ConnectEx started to %d.%d.%d.%d"), s,
+             ip_name->sin_addr.S_un.S_un_b.s_b1,
+             ip_name->sin_addr.S_un.S_un_b.s_b2,
+             ip_name->sin_addr.S_un.S_un_b.s_b3,
+             ip_name->sin_addr.S_un.S_un_b.s_b4);
+  } else {
+    ATLTRACE(_T("%d - ConnectEx started, unsupported protocol"), s);
+  }
+#endif
+  BOOL ret = FALSE;
+  _sockets.ResetSslFd();
+  if (!_test_state._exit)
+    _sockets.Connect(s, name, namelen);
+  LPFN_CONNECTEX_WPT connect_ex = NULL;
+  EnterCriticalSection(&cs);
+  _connectex_functions.Lookup(s, connect_ex);
+  LeaveCriticalSection(&cs);
+  if (connect_ex)
+    ret = connect_ex(s, name, namelen, lpSendBuffer, dwSendDataLength,
+                     lpdwBytesSent, lpOverlapped);
+  if (ret) {
+    _sockets.Connected(s);
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("%d - ConnectEx connected synchronously"), s);
+#endif
+  } else if (WSAGetLastError() == ERROR_IO_PENDING) {
+    EnterCriticalSection(&cs);
+    _connecting.SetAt(s,s);
+    LeaveCriticalSection(&cs);
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("%d - ConnectEx async connect started"), s);
+#endif
+  }
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
 int	CWsHook::recv(SOCKET s, char FAR * buf, int len, int flags) {
   int ret = SOCKET_ERROR;
-  if (_recv) {
+  if (_recv)
     ret = _recv(s, buf, len, flags);
-  }
   if (!_test_state._exit) {
     if (ret == SOCKET_ERROR && len == 1) {
       _sockets.SetSslSocket(s);
@@ -361,10 +467,10 @@ int	CWsHook::WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
                      LPWSAOVERLAPPED lpOverlapped, 
                      LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine) {
   int ret = SOCKET_ERROR;
-  if (_WSARecv) {
+  if (_WSARecv)
     ret = _WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, 
                                             lpOverlapped, lpCompletionRoutine);
-  }
+
   if (!_test_state._exit && lpBuffers && dwBufferCount) {
     if (ret == 0 && lpNumberOfBytesRecvd && *lpNumberOfBytesRecvd) {
       DWORD num_bytes = *lpNumberOfBytesRecvd;
@@ -494,20 +600,26 @@ int CWsHook::select(int nfds, fd_set FAR * readfds, fd_set FAR * writefds,
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 int	CWsHook::getaddrinfo(PCSTR pNodeName, PCSTR pServiceName, 
-                             const ADDRINFOA * pHints, PADDRINFOA * ppResult) {
+                         ADDRINFOA * pHints, PADDRINFOA * ppResult) {
   int ret = WSAEINVAL;
   _sockets.ResetSslFd();
   void * context = NULL;
   CString name = CA2T(pNodeName);
   if (!_test_state._exit)
     context = _dns.LookupStart(name);
+  if (pHints)
+    pHints->ai_flags |= AI_CANONNAME;
 
   if (_getaddrinfo)
     ret = _getaddrinfo(CT2A((LPCTSTR)name), pServiceName, pHints, ppResult);
 
   if (!ret && !_test_state._exit) {
     PADDRINFOA addr = *ppResult;
-    while (addr) {
+    int count = 0;
+    while (addr && count < 100) {
+      count++;
+      if (addr->ai_canonname)
+        _dns.LookupAlias(name, (LPCTSTR)CA2T(addr->ai_canonname));
       if (addr->ai_addrlen >= sizeof(struct sockaddr_in) && 
           addr->ai_family == AF_INET) {
         struct sockaddr_in * ipName = (struct sockaddr_in *)addr->ai_addr;
@@ -526,20 +638,26 @@ int	CWsHook::getaddrinfo(PCSTR pNodeName, PCSTR pServiceName,
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 int	CWsHook::GetAddrInfoW(PCWSTR pNodeName, PCWSTR pServiceName, 
-                             const ADDRINFOW * pHints, PADDRINFOW * ppResult) {
+                          ADDRINFOW * pHints, PADDRINFOW * ppResult) {
   int ret = WSAEINVAL;
   _sockets.ResetSslFd();
   void * context = NULL;
   CString name = CW2T(pNodeName);
   if (!_test_state._exit)
       context = _dns.LookupStart(name);
+  if (pHints)
+    pHints->ai_flags |= AI_CANONNAME;
 
   if (_GetAddrInfoW)
     ret = _GetAddrInfoW(CT2W((LPCWSTR)name), pServiceName, pHints, ppResult);
 
   if (!ret && !_test_state._exit) {
-    PADDRINFOA addr = (PADDRINFOA)*ppResult;
-    while (addr) {
+    PADDRINFOW addr = (PADDRINFOW)*ppResult;
+    int count = 0;
+    while (addr && count < 100) {
+      count++;
+      if (addr->ai_canonname)
+        _dns.LookupAlias(name, addr->ai_canonname);
       if (addr->ai_addrlen >= sizeof(struct sockaddr_in) && 
           addr->ai_family == AF_INET) {
         struct sockaddr_in * ipName = (struct sockaddr_in *)addr->ai_addr;
@@ -570,11 +688,17 @@ struct hostent * CWsHook::gethostbyname(const char * pNodeName) {
     ret = _gethostbyname((LPCSTR)CT2A(name));
 
   if (ret && !_test_state._exit) {
-    int i = 0;
-    while (ret->h_addr_list[i] != 0) {
+    if (ret->h_name)
+      _dns.LookupAlias(name, (LPCTSTR)CA2T(ret->h_name));
+    char ** alias = ret->h_aliases;
+    int count = 0;
+    while (*alias && count < 100) {
+      count++;
+      _dns.LookupAlias(name, (LPCTSTR)CA2T(*alias));
+      alias++;
+    }    
+    for (int i = 0; ret->h_addr_list[i] != 0; i++)
       _dns.LookupAddress(context, *(u_long *)ret->h_addr_list[i]);
-      i++;
-    }
   }
 
   int err = WSAHOST_NOT_FOUND;
@@ -584,6 +708,37 @@ struct hostent * CWsHook::gethostbyname(const char * pNodeName) {
     _dns.LookupDone(context, err);
 
   return ret;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CWsHook::ProcessOverlappedIo(SOCKET s, LPOVERLAPPED lpOverlapped,
+                                  LPDWORD lpNumberOfBytesTransferred) {
+  WsaBuffTracker buff;
+  // handle a receive
+  if (_recv_buffers.Lookup(lpOverlapped, buff)) {
+    DWORD bytes = *lpNumberOfBytesTransferred;
+    for (DWORD i = 0; i < buff._buffer_count && bytes; i++) {
+      DWORD data_bytes = min(bytes, buff._buffers[i].len);
+      if (data_bytes && buff._buffers[i].buf) {
+        DataChunk chunk(buff._buffers[i].buf, data_bytes);
+        _sockets.DataIn(s, chunk, false);
+        bytes -= data_bytes;
+      }
+    }
+  }
+  // handle a send (where we modified the outbound headers)
+  DataChunk chunk;
+  if (_send_buffers.Lookup(lpOverlapped, chunk)) {
+    _send_buffers.RemoveKey(lpOverlapped);
+    if (lpNumberOfBytesTransferred) {
+      DWORD len = *lpNumberOfBytesTransferred;
+      if (_send_buffer_original_length.Lookup(lpOverlapped, len)) {
+        _send_buffer_original_length.RemoveKey(lpOverlapped);
+        *lpNumberOfBytesTransferred = len;
+      }
+    }
+  }
 }
 
 /*-----------------------------------------------------------------------------
@@ -599,33 +754,8 @@ BOOL CWsHook::WSAGetOverlappedResult(SOCKET s, LPWSAOVERLAPPED lpOverlapped,
     ret = _WSAGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, 
                                   lpdwFlags);
 
-  if (ret && lpcbTransfer && !_test_state._exit) {
-    WsaBuffTracker buff;
-    // handle a receive
-    if (_recv_buffers.Lookup(lpOverlapped, buff)) {
-      DWORD bytes = *lpcbTransfer;
-      for (DWORD i = 0; i < buff._buffer_count && bytes; i++) {
-        DWORD data_bytes = min(bytes, buff._buffers[i].len);
-        if (data_bytes && buff._buffers[i].buf) {
-          DataChunk chunk(buff._buffers[i].buf, data_bytes);
-          _sockets.DataIn(s, chunk, false);
-          bytes -= data_bytes;
-        }
-      }
-    }
-    // handle a send (where we modified the outbound headers
-    DataChunk chunk;
-    if (_send_buffers.Lookup(lpOverlapped, chunk)) {
-      _send_buffers.RemoveKey(lpOverlapped);
-      if (lpcbTransfer) {
-        DWORD len = *lpcbTransfer;
-        if (_send_buffer_original_length.Lookup(lpOverlapped, len)) {
-          _send_buffer_original_length.RemoveKey(lpOverlapped);
-          *lpcbTransfer = len;
-        }
-      }
-    }
-  }
+  if (ret && lpcbTransfer && !_test_state._exit)
+    ProcessOverlappedIo(s, lpOverlapped, lpcbTransfer);
 
   return ret;
 }
@@ -666,7 +796,7 @@ int CWsHook::WSAEnumNetworkEvents(SOCKET s, WSAEVENT hEventObject,
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 int CWsHook::GetAddrInfoExA(PCSTR pName, PCSTR pServiceName, DWORD dwNameSpace,
-    LPGUID lpNspId, const ADDRINFOEXA *hints, PADDRINFOEXA *ppResult,
+    LPGUID lpNspId, ADDRINFOEXA *hints, PADDRINFOEXA *ppResult,
     struct timeval *timeout, LPOVERLAPPED lpOverlapped,
     LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
     LPHANDLE lpNameHandle) {
@@ -679,6 +809,8 @@ int CWsHook::GetAddrInfoExA(PCSTR pName, PCSTR pServiceName, DWORD dwNameSpace,
   CString name = (LPCWSTR)CA2W(pName);
   if (!_test_state._exit)
       context = _dns.LookupStart(name);
+  if (hints)
+    hints->ai_flags |= AI_CANONNAME;
 
   if (_GetAddrInfoExA)
     ret = _GetAddrInfoExA((LPCSTR)CW2A(name), pServiceName, dwNameSpace,
@@ -688,7 +820,11 @@ int CWsHook::GetAddrInfoExA(PCSTR pName, PCSTR pServiceName, DWORD dwNameSpace,
   int err = WSAHOST_NOT_FOUND;
   if (ret == NO_ERROR && ppResult && *ppResult) {
     PADDRINFOEXA addr = *ppResult;
-    while (addr) {
+    int count = 0;
+    while (addr && count < 100) {
+      count++;
+      if (addr->ai_canonname)
+        _dns.LookupAlias(name, (LPCTSTR)CA2T(addr->ai_canonname));
       if (addr->ai_addrlen >= sizeof(struct sockaddr_in) && 
           addr->ai_family == AF_INET) {
         struct sockaddr_in * ipName = (struct sockaddr_in *)addr->ai_addr;
@@ -706,7 +842,7 @@ int CWsHook::GetAddrInfoExA(PCSTR pName, PCSTR pServiceName, DWORD dwNameSpace,
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 int CWsHook::GetAddrInfoExW(PCWSTR pName, PCWSTR pServiceName, DWORD dwNameSpace,
-    LPGUID lpNspId, const ADDRINFOEXW *hints, PADDRINFOEXW *ppResult,
+    LPGUID lpNspId, ADDRINFOEXW *hints, PADDRINFOEXW *ppResult,
     struct timeval *timeout, LPOVERLAPPED lpOverlapped,
     LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
     LPHANDLE lpHandle) {
@@ -720,6 +856,8 @@ int CWsHook::GetAddrInfoExW(PCWSTR pName, PCWSTR pServiceName, DWORD dwNameSpace
   CString name = pName;
   if (!_test_state._exit)
       context = _dns.LookupStart(name);
+  if (hints)
+    hints->ai_flags |= AI_CANONNAME;
 
   if (_GetAddrInfoExW)
     ret = _GetAddrInfoExW(LPCWSTR(name), pServiceName, dwNameSpace, lpNspId,
@@ -729,7 +867,11 @@ int CWsHook::GetAddrInfoExW(PCWSTR pName, PCWSTR pServiceName, DWORD dwNameSpace
   int err = WSAHOST_NOT_FOUND;
   if (ret == NO_ERROR && ppResult && *ppResult) {
     PADDRINFOEXW addr = *ppResult;
-    while (addr) {
+    int count = 0;
+    while (addr && count < 100) {
+      count++;
+      if (addr->ai_canonname)
+        _dns.LookupAlias(name, addr->ai_canonname);
       if (addr->ai_addrlen >= sizeof(struct sockaddr_in) && 
           addr->ai_family == AF_INET) {
         struct sockaddr_in * ipName = (struct sockaddr_in *)addr->ai_addr;
@@ -741,5 +883,128 @@ int CWsHook::GetAddrInfoExW(PCWSTR pName, PCWSTR pServiceName, DWORD dwNameSpace
   }
   if (context)
     _dns.LookupDone(context, err);
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+VOID WINAPI ThreadpoolCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context,
+    PVOID Overlapped, ULONG IoResult, ULONG_PTR NumberOfBytesTransferred,
+    PTP_IO Io) {
+  if (pHook)
+    pHook->ThreadpoolCallback(Instance, Context, Overlapped, IoResult,
+                              NumberOfBytesTransferred, Io);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CWsHook::ThreadpoolCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context,
+    PVOID Overlapped, ULONG IoResult, ULONG_PTR NumberOfBytesTransferred,
+    PTP_IO Io) {
+  PTP_WIN32_IO_CALLBACK_WPT callback = NULL;
+  EnterCriticalSection(&cs);
+  _threadpool_callbacks.Lookup(Io, callback);
+  SOCKET s = INVALID_SOCKET;
+  _threadpool_sockets.Lookup(Io, s);
+  LeaveCriticalSection(&cs);
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("%d: ThreadpoolCallback - %d bytes"), s,
+           NumberOfBytesTransferred);
+#endif
+  if (s != INVALID_SOCKET && _connecting.RemoveKey(s)) {
+    _sockets.Connected(s);
+  }
+  if (s != INVALID_SOCKET && 
+      Overlapped && 
+      NumberOfBytesTransferred &&
+      !_test_state._exit) {
+    DWORD bytes = NumberOfBytesTransferred;
+    ProcessOverlappedIo(s, (LPOVERLAPPED)Overlapped, &bytes);
+    NumberOfBytesTransferred = bytes;
+  }
+  if (callback)
+    callback(Instance, Context, Overlapped, IoResult, NumberOfBytesTransferred,
+             Io);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+PTP_IO CWsHook::CreateThreadpoolIo(HANDLE fl,
+    PTP_WIN32_IO_CALLBACK_WPT pfnio, PVOID pv, PTP_CALLBACK_ENVIRON pcbe) {
+  PTP_IO ret = NULL;
+  if (_CreateThreadpoolIo) {
+    EnterCriticalSection(&cs);
+    ret = _CreateThreadpoolIo(fl, ::ThreadpoolCallback, pv, pcbe);
+    if (ret) {
+      _threadpool_callbacks.SetAt(ret, pfnio);
+      _threadpool_sockets.SetAt(ret, (SOCKET)fl);
+    }
+    LeaveCriticalSection(&cs);
+  }
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("%d: CreateThreadpoolIo - callback = 0x%p, pio = 0x%p"),
+      fl, pfnio, ret);
+#endif
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CWsHook::CloseThreadpoolIo(PTP_IO pio) {
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("CloseThreadpoolIo - pio = 0x%p"), pio);
+#endif
+  if (_CloseThreadpoolIo)
+    _CloseThreadpoolIo(pio);
+  EnterCriticalSection(&cs);
+  _threadpool_callbacks.RemoveKey(pio);
+  _threadpool_sockets.RemoveKey(pio);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void CWsHook::StartThreadpoolIo(PTP_IO pio) {
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("StartThreadpoolIo - pio = 0x%p"), pio);
+#endif
+  if (_StartThreadpoolIo)
+    _StartThreadpoolIo(pio);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+int CWsHook::WSAIoctl(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer,
+  DWORD cbInBuffer, LPVOID lpvOutBuffer, DWORD cbOutBuffer,
+  LPDWORD lpcbBytesReturned, LPWSAOVERLAPPED lpOverlapped,
+  LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine) {
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("WSAIoctl - code = %d"), dwIoControlCode);
+#endif
+  int ret = SOCKET_ERROR;
+  if (_WSAIoctl)
+    ret = _WSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer,
+                    cbOutBuffer, lpcbBytesReturned, lpOverlapped,
+                    lpCompletionRoutine);
+
+  // Handle the special case where they request the address of ConnectEx.
+  if (dwIoControlCode == SIO_GET_EXTENSION_FUNCTION_POINTER &&
+      lpvInBuffer &&
+      cbInBuffer >= sizeof(GUID) &&
+      lpvOutBuffer &&
+      cbOutBuffer >= sizeof(LPFN_CONNECTEX_WPT)) {
+    GUID connect_ex_guid = 
+        {0x25a207b9,0xddf3,0x4660,{0x8e,0xe9,0x76,0xe5,0x8c,0x74,0x06,0x3e}};
+    if (!memcmp(lpvInBuffer, &connect_ex_guid, sizeof(GUID))) {
+#ifdef TRACE_WINSOCK
+  ATLTRACE(_T("WSAIoctl - Replaced ConnectEx"));
+#endif
+      LPFN_CONNECTEX_WPT connect_ex;
+      memcpy(&connect_ex, lpvOutBuffer, sizeof(LPFN_CONNECTEX_WPT));
+      _connectex_functions.SetAt(s, connect_ex);
+      LPFN_CONNECTEX_WPT connect_ex_hook = ConnectEx_Hook;
+      memcpy(lpvOutBuffer, &connect_ex_hook, sizeof(LPFN_CONNECTEX_WPT));
+    }
+  }
   return ret;
 }

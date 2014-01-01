@@ -25,19 +25,13 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
-/*jslint nomen:false */
 
-var events = require('events');
 var http = require('http');
-var url = require('url');
-var util = require('util');
 var logger = require('logger');
-var WebSocket = require('ws');
+var url = require('url');
 
-exports.PREFIX_NETWORK = 'Network.';
-exports.PREFIX_PAGE = 'Page.';
-exports.PREFIX_TIMELINE = 'Timeline.';
-
+/** Allow tests to stub out. */
+exports.WebSocket = require('ws');
 
 function processResponse(response, callback) {
   'use strict';
@@ -56,8 +50,15 @@ function processResponse(response, callback) {
     throw new Error('Bad HTTP response: ' + JSON.stringify(response));
   });
 }
+/** Public function. */
 exports.ProcessResponse = processResponse;
 
+/**
+ * WebKit Remote Debugger Protocol connection to a WebKit based browser.
+ *
+ * @param {string} devToolsUrl WKRDP endpoint.
+ * @constructor
+ */
 function DevTools(devToolsUrl) {
   'use strict';
   this.devToolsUrl_ = devToolsUrl;
@@ -65,122 +66,170 @@ function DevTools(devToolsUrl) {
   this.ws_ = undefined;
   this.commandId_ = 0;
   this.commandCallbacks_ = {};
+  this.messageCallback_ = function() {};
 }
-util.inherits(DevTools, events.EventEmitter);
+/** Public class. */
 exports.DevTools = DevTools;
 
-DevTools.prototype.connect = function() {
+/**
+ * Sets the onMessage(Object) callback.
+ *
+ * @param {Function} callback Function({Object} message).
+ */
+DevTools.prototype.onMessage = function(callback) {
   'use strict';
-  var self = this;  // For closure
-  http.get(url.parse(self.devToolsUrl_), function(response) {
-    exports.ProcessResponse(response, function(responseBody) {
-      var devToolsJson = JSON.parse(responseBody);
-      try {
-        self.debuggerUrl_ = devToolsJson[0].webSocketDebuggerUrl;
-      } catch (e) {
-        throw new Error('DevTools response at ' + self.devToolsUrl_ +
-            ' does not contain webSocketDebuggerUrl: ' + responseBody);
-      }
-      self.connectDebugger_();
-    });
-  });
+  this.messageCallback_ = callback;
 };
 
-DevTools.prototype.connectDebugger_ = function() {
+/**
+ * Establishes connection to the WKRDP endpoint, first tab.
+ *
+ * @param {Function} callback Function() invoked on success.
+ * @param {Function} errback Function({Error} err) invoked on failure.
+ */
+DevTools.prototype.connect = function(callback, errback) {
   'use strict';
-  var self = this;  // For closure
+  var retries = 0;  // ios_webkit_debug_proxy sometimes returns an empty array.
+  var listTabs = (function() {
+    var request = http.get(url.parse(this.devToolsUrl_), function(response) {
+      exports.ProcessResponse(response, function(responseBody) {
+        var devToolsJson = JSON.parse(responseBody);
+        if (devToolsJson.length === 0 && retries < 10) {
+          retries += 1;
+          logger.debug('Retrying DevTools tab list, attempt %d', retries + 1);
+          global.setTimeout(listTabs, 1000);
+          return;
+        }
+        this.debuggerUrl_ = devToolsJson[0].webSocketDebuggerUrl;
+        if (!this.debuggerUrl_) {
+          throw new Error('DevTools response at ' + this.devToolsUrl_ +
+              ' does not contain webSocketDebuggerUrl: ' + responseBody);
+        }
+        this.connectDebugger_(callback, errback);
+      }.bind(this));
+    }.bind(this));
+    request.on('error', function(e) {
+      errback(e);
+    });
+  }.bind(this));
+  listTabs();
+};
+
+/**
+ * @param {Function} callback Function({string} responseBody).
+ * @param {Function} errback Function({Error} err).
+ * @private
+ */
+DevTools.prototype.connectDebugger_ = function(callback, errback) {
+  'use strict';
   // TODO(klm): do we actually need origin?
-  var ws = new WebSocket(this.debuggerUrl_, {'origin': 'WebPageTest'});
+  var ws = new exports.WebSocket(this.debuggerUrl_, {'origin': 'WebPageTest'});
 
   ws.on('error', function(e) {
-    throw e;
+    if (errback) {
+      errback(e);
+    } else {
+      logger.error('Ignoring unhaldled WKRDP connection failure: %s', e);
+    }
   });
 
   ws.on('open', function() {
     logger.extra('WebSocket connected: ' + JSON.stringify(ws));
-    self.ws_ = ws;
-    self.emit('connect');
-  });
-
-  ws.on('message', function(data, flags) {
-    // flags.binary will be set if a binary data is received
-    // flags.masked will be set if the data was masked
-    var callbackErrback;
-    if (!flags.binary) {
-      var messageJson = JSON.parse(data);
-      if (messageJson.result && messageJson.id) {
-        callbackErrback = self.commandCallbacks_[messageJson.id];
-        if (callbackErrback) {
-          delete self.commandCallbacks_[messageJson.id];
-          if (callbackErrback.callback) {
-            callbackErrback.callback(messageJson.result);
-          }
-        }
-        self.emit('result', messageJson.id, messageJson.result);
-      } else if (messageJson.error && messageJson.id) {
-        callbackErrback = self.commandCallbacks_[messageJson.id];
-        if (callbackErrback) {
-          delete self.commandCallbacks_[messageJson.id];
-          if (callbackErrback.errback) {
-            callbackErrback.errback(messageJson.result);
-          }
-        }
-        //self.emit('error', messageJson.id, messageJson.error);
-      } else {
-        self.emit('message', messageJson);
-      }
-    } else {
-      throw new Error('Unexpected binary WebSocket message');
+    this.ws_ = ws;
+    if (callback) {
+      callback();
     }
-  });
+  }.bind(this));
+
+  ws.on('message', this.onMessage_.bind(this));
 };
 
-DevTools.prototype.command = function(command, callback, errback) {
+/**
+ * @param {string} data message data in JSON string format.
+ * @param {Object} flags Flags, where
+ *   flags.binary will be set if a binary data is received
+ *   flags.masked will be set if the data was masked.
+ * @private
+ */
+DevTools.prototype.onMessage_ = function(data, flags) {
+  'use strict';
+  var callbackErrback;
+  if (!flags.binary) {
+    var message;
+    try {
+      message = JSON.parse(data);
+    } catch (e) {
+      logger.error('JSON parse error on DevTools data: %s', data);
+      return;
+    }
+    if (message.id) {
+      logger.debug('Command response id: %s', message.id);
+      callbackErrback = this.commandCallbacks_[message.id];
+      if (callbackErrback) {
+        delete this.commandCallbacks_[message.id];
+        if (message.error) {
+          if (callbackErrback.errback) {
+            callbackErrback.errback(new Error(message.error.message));
+          } else {
+            logger.error('Ingoring unhandled WKRDP error for command %s: %s',
+                callbackErrback.method, message.error.message);
+          }
+        } else if (callbackErrback.callback) {
+          callbackErrback.callback(message.result);
+        }
+      } else {
+        logger.error('WKRDP response for command that we did not send: %s',
+            data);
+      }
+    } else {
+      this.messageCallback_(message);
+    }
+  } else {
+    logger.error('Unexpected binary WebSocket message');
+  }
+};
+
+/**
+ * @param {Object} command the WKRDP command object to send, except id field.
+ * @param {Function=} cb Function({Error=} err, {string=} responseBody).
+ * @return {Number} id.
+ */
+DevTools.prototype.sendCommand = function(command, cb) {
+  'use strict';
+  // Split cb into callback/errback
+  var callback;
+  if (cb) {
+    callback = function() {
+      // Pass undefined as the err argument to cb.
+      cb.apply(cb, [undefined].concat(Array.prototype.slice.apply(arguments)));
+    };
+  }
+  var errback = cb;
+  return this.command_(command, callback, errback);
+};
+
+/**
+ * Sends WKRDP command and registers response handing callback/errback.
+ *
+ * @param {Object} command the WKRDP command object to send, except id field.
+ * @param {Function} callback Function({string} responseBody) invoked on
+ *   success.
+ * @param {Function} errback Function({Error} err) invoked on failure.
+ * @return {Number} Generated command id (from an incrementing counter).
+ * @private
+ */
+DevTools.prototype.command_ = function(command, callback, errback) {
   'use strict';
   this.commandId_ += 1;
   command.id = this.commandId_;
   if (callback || errback) {
     this.commandCallbacks_[command.id] = {
+        method: command.method,
         callback: callback,
         errback: errback
-    };
+      };
   }
+  logger.debug('Send command: %j', command);
   this.ws_.send(JSON.stringify(command));
   return command.id;
-};
-
-DevTools.prototype.networkMethod = function(method, callback, errback) {
-  'use strict';
-  this.command({method: exports.PREFIX_NETWORK + method}, callback, errback);
-};
-
-DevTools.prototype.pageMethod = function(method, callback, errback) {
-  'use strict';
-  this.command({method: exports.PREFIX_PAGE + method}, callback, errback);
-};
-
-DevTools.prototype.timelineMethod = function(method, callback, errback) {
-  'use strict';
-  this.command({method: exports.PREFIX_TIMELINE + method}, callback, errback);
-};
-
-exports.isNetworkMessage = function(message) {
-  'use strict';
-  return (message.method &&
-      message.method.slice(0, exports.PREFIX_NETWORK.length) ===
-          exports.PREFIX_NETWORK);
-};
-
-exports.isPageMessage = function(message) {
-  'use strict';
-  return (message.method &&
-      message.method.slice(0, exports.PREFIX_PAGE.length) ===
-          exports.PREFIX_PAGE);
-};
-
-exports.isTimelineMessage = function(message) {
-  'use strict';
-  return (message.method &&
-      message.method.slice(0, exports.PREFIX_TIMELINE.length) ===
-          exports.PREFIX_TIMELINE);
 };

@@ -81,10 +81,10 @@ public:
 		, highlighted(false)
 		, ignore(false)
 	{ 
-		QueryPerformanceCounter((LARGE_INTEGER *)&start); 
+		QueryPerfCounter(start); 
 	}
 	virtual ~CTrackedEvent(void){}
-	virtual void Done(void){ QueryPerformanceCounter((LARGE_INTEGER *)&end); }
+	virtual void Done(void){ QueryPerfCounter(end); }
 	
 	__int64		start;
 	__int64		end;
@@ -224,6 +224,7 @@ public:
 		,cookieScore(-1)
 		,minifyScore(-1)
 		,compressionScore(-1)
+		,jpegScans(0)
 		,etagScore(-1)
 		,gzipTotal(0)
 		,gzipTarget(0)
@@ -237,7 +238,7 @@ public:
 	{
 		memset(&peer, 0, sizeof(peer));
 
-		QueryPerformanceFrequency((LARGE_INTEGER *)&msFreq);
+		QueryPerfFrequency(msFreq);
 		msFreq = msFreq / (__int64)1000;
 	}
 	
@@ -305,6 +306,7 @@ public:
 	int					cookieScore;
 	int					minifyScore;
 	int					compressionScore;
+	int         jpegScans;
 	int					etagScore;
 	CString				cdnProvider;
 
@@ -338,7 +340,6 @@ public:
 		,socketId(0)
 		,dns(0)
 		,request(0)
-		,state(0)
 		,host(_T(""))
 		,linkedRequest(0)
 		,flaggedConnection(false)
@@ -363,7 +364,6 @@ public:
 	DWORD			socketId;
 	CDnsLookup *	dns;		// pointer to the DNS event that this came from (if there is one)
 	CTrackedEvent *	request;	// pointer to the first request that went over this socket
-	DWORD			state;		// odd = last action = send, even = last action = recv (mostly for https ssl handshake handling)
 	CString			host;		// host name from the DNS lookup (if available)
 	bool			flaggedConnection;	// is this a connection we're keeping track of (for parallel request counts)?
 	CWinInetRequest * linkedRequest;	// WinInet request that this socket connect belongs to

@@ -1,5 +1,7 @@
 #include "StdAfx.h"
 #include "URLBlaster.h"
+#include "urlBlast.h"
+#include "urlBlastDlg.h"
 #include <process.h>
 #include <shlwapi.h>
 #include <Userenv.h>
@@ -11,7 +13,7 @@
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-CURLBlaster::CURLBlaster(HWND hWnd, CLog &logRef, CIpfw &ipfwRef, HANDLE &testingMutexRef)
+CURLBlaster::CURLBlaster(HWND hWnd, CLog &logRef, CIpfw &ipfwRef, HANDLE &testingMutexRef, CurlBlastDlg &dlgRef)
 : userName(_T(""))
 , hLogonToken(NULL)
 , hProfile(NULL)
@@ -22,14 +24,7 @@ CURLBlaster::CURLBlaster(HWND hWnd, CLog &logRef, CIpfw &ipfwRef, HANDLE &testin
 , count(0)
 , hDlg(hWnd)
 , urlManager(NULL)
-, testType(0)
-, labID(0)
-, dialerID(0)
-, connectionType(0)
 , timeout(60)
-, experimental(0)
-, sequentialErrors(0)
-, screenShotErrors(0)
 , browserPID(0)
 , userSID(NULL)
 , log(logRef)
@@ -42,11 +37,10 @@ CURLBlaster::CURLBlaster(HWND hWnd, CLog &logRef, CIpfw &ipfwRef, HANDLE &testin
 , heartbeatEvent(NULL)
 , ipfw(ipfwRef)
 , testingMutex(testingMutexRef)
+, dlg(dlgRef)
 {
 	InitializeCriticalSection(&cs);
 	hMustExit = CreateEvent(0, TRUE, FALSE, NULL );
-	hClearedCache = CreateEvent(0, TRUE, FALSE, NULL );
-	hRun = CreateEvent(0, TRUE, FALSE, NULL );
 	srand(GetTickCount());
 }
 
@@ -75,8 +69,6 @@ CURLBlaster::~CURLBlaster(void)
     CloseHandle(heartbeatEvent);
 		
 	CloseHandle( hMustExit );
-	CloseHandle( hClearedCache );
-	CloseHandle( hRun );
 	EnterCriticalSection(&cs);
 	if( userSID )
 	{
@@ -165,6 +157,7 @@ bool CURLBlaster::Start(int userIndex)
 	  cookies = profile + _T("\\Cookies");
 	  history = profile + _T("\\Local Settings\\History");
 	  tempFiles = profile + _T("\\Local Settings\\Temporary Internet Files");
+	  webCache = profile + _T("\\Local Settings\\Application Data\\Microsoft\\Windows\\WebCache");
 	  tempDir = profile + _T("\\Local Settings\\Temp");
 	  desktopPath = profile + _T("\\Local Settings\\Desktop");
 	  silverlight = profile + _T("\\Local Settings\\Application Data\\Microsoft\\Silverlight");
@@ -210,23 +203,22 @@ void CURLBlaster::ThreadProc(void)
 {
 	if( DoUserLogon() )
 	{
-		sequentialErrors = 0;
-		
-		log.Trace(_T("Waiting for startup synchronization"));
-
-		// synchronize all of the threads and don't start testing until they have all cleared out the caches (heavy disk activity)
-		SetEvent(hClearedCache);
-		WaitForSingleObject(hRun, INFINITE);
-
 		log.Trace(_T("Running..."));
+		dlg.SetStatus(_T("Running..."));
 
 		// start off with IPFW in a clean state
+    WaitForSingleObject(testingMutex, INFINITE);
 		ResetIpfw();
+	  Launch(_T("RunDll32.exe InetCpl.cpl,ClearMyTracksByProcess 6655"));
+    ReleaseMutex(testingMutex);
 
 		while( WaitForSingleObject(hMustExit,0) == WAIT_TIMEOUT )
 		{
+		  dlg.Alive();
+		  
 			// get the url to test
       WaitForSingleObject(testingMutex, INFINITE);
+      dlg.SetStatus(_T("Checking for work..."));
 			if(	GetUrl() )
 			{
         if( info.testType.GetLength() )
@@ -253,27 +245,39 @@ void CURLBlaster::ThreadProc(void)
 					// loop for as many runs as are needed for the current request
 					do
 					{
+            OutputDebugString(_T("[UrlBlast] - Clearing Cache"));
+            dlg.SetStatus(_T("[UrlBlast] - Clearing Cache"));
 						ClearCache();
 
+						dlg.Alive();
 						if( Launch(preLaunch) )
 						{
 							LaunchBrowser();
-
+              dlg.SetStatus(_T("Uploading test run..."));
+              
 							// record the cleared cache view
-							if( urlManager->RunRepeatView(info) )
+							if( urlManager->RunRepeatView(info) ) {
+							  dlg.Alive();
 								LaunchBrowser();
+							}
 
 							Launch(postLaunch);
 						}
 
+            dlg.SetStatus(_T("Uploading test run..."));
 						urlManager->UrlFinished(info);
 					}while( !info.done );
 				}
         ReleaseMutex(testingMutex);
+        dlg.Alive();
+        OutputDebugString(_T("[UrlBlast] - Test complete"));
+        dlg.SetStatus(_T("[UrlBlast] - Test complete"));
 			}
 			else
       {
         ReleaseMutex(testingMutex);
+        dlg.Alive();
+        dlg.SetStatus(_T("Waiting for next test..."));
 				Sleep(500 + (rand() % 500));
       }
 		}
@@ -416,6 +420,7 @@ bool CURLBlaster::DoUserLogon(void)
 					  {
 						  silverlight = path;
               recovery = silverlight + _T("\\Microsoft\\Internet Explorer\\Recovery\\Active");
+						  webCache = silverlight + _T("\\Microsoft\\Windows\\WebCache");
 						  silverlight += _T("\\Microsoft\\Silverlight");
 					  }
 
@@ -457,6 +462,7 @@ bool CURLBlaster::DoUserLogon(void)
 				  cookies.Replace(_T("%USERPROFILE%"), profile);
 				  history.Replace(_T("%USERPROFILE%"), profile);
 				  tempFiles.Replace(_T("%USERPROFILE%"), profile);
+				  webCache.Replace(_T("%USERPROFILE%"), profile);
 				  tempDir.Replace(_T("%USERPROFILE%"), profile);
 				  desktopPath.Replace(_T("%USERPROFILE%"), profile);
 				  silverlight.Replace(_T("%USERPROFILE%"), profile);
@@ -498,6 +504,7 @@ void CURLBlaster::ClearCache(void)
   DeleteDirectory( domStorage, false );
 	cacheCount = 0;
 	DeleteDirectory( tempFiles, false );
+	DeleteDirectory( webCache, false );
 	DeleteDirectory( tempDir, false );
 	CString buff;
 	buff.Format(_T("%d files found in cache\n"), cacheCount);
@@ -513,8 +520,10 @@ void CURLBlaster::ClearCache(void)
   DeleteRegKey((HKEY)hProfile, _T("Software\\Microsoft\\Internet Explorer\\DOMStorage"), false);
 
   // flush the certificate revocation caches
-  Launch(_T("certutil.exe -urlcache * delete"));
-  Launch(_T("certutil.exe -setreg chain\\ChainCacheResyncFiletime @now"));
+  if (info.clearCerts) {
+    Launch(_T("certutil.exe -urlcache * delete"));
+    Launch(_T("certutil.exe -setreg chain\\ChainCacheResyncFiletime @now"));
+  }
 
   // clear the wininet cache if we are running as the current user
   if (hProfile == HKEY_CURRENT_USER) {
@@ -631,6 +640,50 @@ void CURLBlaster::ClearCache(void)
 	    free(info);
   }
 
+  // delete any .tmp files in our directory or the root directory of the drive.
+  // Not sure where they are coming from but they collect over time.
+	TCHAR path[MAX_PATH];
+  if (GetModuleFileName(NULL, path, _countof(path))) {
+		*PathFindFileName(path) = NULL;
+    CString dir = path;
+    WIN32_FIND_DATA fd;
+    HANDLE find = FindFirstFile(dir + _T("\\*.tmp"), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+      do {
+        DeleteFile(dir + CString(_T("\\")) + fd.cFileName);
+      } while(FindNextFile(find, &fd));
+      FindClose(find);
+    }
+    find = FindFirstFile(_T("C:\\*.tmp"), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+      do {
+        DeleteFile(CString(_T("C:\\")) + fd.cFileName);
+      } while(FindNextFile(find, &fd));
+      FindClose(find);
+    }
+  }
+  
+    // This magic value is the combination of the following bitflags:
+  // #define CLEAR_HISTORY         0x0001 // Clears history
+  // #define CLEAR_COOKIES         0x0002 // Clears cookies
+  // #define CLEAR_CACHE           0x0004 // Clears Temporary Internet Files folder
+  // #define CLEAR_CACHE_ALL       0x0008 // Clears offline favorites and download history
+  // #define CLEAR_FORM_DATA       0x0010 // Clears saved form data for form auto-fill-in
+  // #define CLEAR_PASSWORDS       0x0020 // Clears passwords saved for websites
+  // #define CLEAR_PHISHING_FILTER 0x0040 // Clears phishing filter data
+  // #define CLEAR_RECOVERY_DATA   0x0080 // Clears webpage recovery data
+  // #define CLEAR_PRIVACY_ADVISOR 0x0800 // Clears tracking data
+  // #define CLEAR_SHOW_NO_GUI     0x0100 // Do not show a GUI when running the cache clearing
+  //
+  // Bitflags available but not used in this magic value are as follows:
+  // #define CLEAR_USE_NO_THREAD      0x0200 // Do not use multithreading for deletion
+  // #define CLEAR_PRIVATE_CACHE      0x0400 // Valid only when browser is in private browsing mode
+  // #define CLEAR_DELETE_ALL         0x1000 // Deletes data stored by add-ons
+  // #define CLEAR_PRESERVE_FAVORITES 0x2000 // Preserves cached data for "favorite" websites
+
+  // Use the command-line version of cache clearing in case WinInet didn't work
+  Launch(_T("RunDll32.exe InetCpl.cpl,ClearMyTracksByProcess 6655"));
+
 	cached = false;
 }
 
@@ -643,8 +696,15 @@ bool CURLBlaster::LaunchBrowser(void)
 	info.testResult = -1;
 
 	// flush the DNS cache
-  if( !keepDNS )
+  OutputDebugString(_T("[UrlBlast] - Flushing DNS"));
+  if( !keepDNS ) {
+    dlg.SetStatus(_T("Flushing DNS..."));
 	  FlushDNS();
+	}
+
+  // move the cursor to the top-left corner
+  SetCursorPos(0,0);
+  ShowCursor(FALSE);
 	
 	if( !info.url.IsEmpty() )
 	{
@@ -652,6 +712,8 @@ bool CURLBlaster::LaunchBrowser(void)
 		memset(&si, 0, sizeof(si));
 		si.cb = sizeof(si);
 
+    OutputDebugString(_T("[UrlBlast] - Configuring IPFW"));
+    dlg.SetStatus(_T("Configuring IPFW..."));
 		if( ConfigureIpfw() )
 		{
 			if( ConfigureIE() )
@@ -732,6 +794,9 @@ bool CURLBlaster::LaunchBrowser(void)
 				
 				log.Trace(_T("Launching... user='%s', path='%s', command line='%s'"), (LPCTSTR)userName, (LPCTSTR)exe, (LPCTSTR)commandLine);
 				
+        OutputDebugString(_T("[UrlBlast] - Launching Browser"));
+        dlg.SetStatus(_T("Launching Browser..."));
+
 				// launch internet explorer as our user
         if( heartbeatEvent )
           ResetEvent(heartbeatEvent);
@@ -750,6 +815,8 @@ bool CURLBlaster::LaunchBrowser(void)
 
         if( ok )
 				{
+				  dlg.SetStatus(_T("Waiting for test to complete..."));
+				  
 					// keep track of the process ID for the browser we care about
 					browserPID = pi.dwProcessId;
 					LeaveCriticalSection(&cs);
@@ -762,7 +829,7 @@ bool CURLBlaster::LaunchBrowser(void)
 					// wait for it to exit - give it up to double the timeout value
 					// TODO:  have urlManager specify the timeout
 				  int multiple = 2;
-          if( info.runningScript || info.aft )
+          if( info.runningScript )
 					  multiple = 10;
           if( heartbeatEvent )
           {
@@ -798,6 +865,7 @@ bool CURLBlaster::LaunchBrowser(void)
 						log.LogEvent(event_TerminatedBrowser, 0, (LPCTSTR)eventName.Left(1000));
 						TerminateProcess(pi.hProcess, 0);	// kill the browser if it didn't exit on it's own
 					}
+          OutputDebugString(_T("[UrlBlast] - Browser Finished"));
 					
 					EnterCriticalSection(&cs);
 					browserPID = 0;
@@ -810,34 +878,18 @@ bool CURLBlaster::LaunchBrowser(void)
 					HKEY hKey;
 					if( RegCreateKeyEx((HKEY)hProfile, _T("SOFTWARE\\AOL\\ieWatch"), 0, 0, 0, KEY_READ | KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS )
 					{
-						DWORD len = sizeof(info.testResult);
-						if( RegQueryValueEx(hKey, _T("Result"), 0, 0, (LPBYTE)&info.testResult, &len) == ERROR_SUCCESS )
-						{
-							// only track sequential errors when not running a script
-							if( !info.runningScript )
-							{
-								if( info.testResult & 0x80000000 )
-									sequentialErrors++;
-								else
-									sequentialErrors = 0;
-							}
-						}
+						info.cpu = 0;
+						DWORD len = sizeof(info.cpu);
+						RegQueryValueEx(hKey, _T("cpu"), 0, 0, (LPBYTE)&info.cpu, &len);
 								
 						RegDeleteValue(hKey, _T("Result"));
-						
-						// delete a few other keys we don't want to persist
-						RegDeleteValue(hKey, _T("Use Address"));
-						RegDeleteValue(hKey, _T("DNS Latency"));
+						RegDeleteValue(hKey, _T("cpu"));
 						
 						RegCloseKey(hKey);
 					}
 
 					// clean up any processes that may have been spawned
 					KillProcs();
-
-					// see if we are running in crawler mode and collected links
-					if( info.harvestLinks )
-						urlManager->HarvestedLinks(info);
 				}
 				else
 				{
@@ -850,8 +902,6 @@ bool CURLBlaster::LaunchBrowser(void)
 					CString msg;
 					msg.Format(_T("Failed to launch browser '%s' - %s"), (LPCTSTR)szMsg, (LPCTSTR)exe);
 					log.LogEvent(event_Error, 0, msg);
-
-					SetEvent(hMustExit);	// something went horribly wrong, this should never happen but don't get stuck in a loop
 				}
 
         // stop the tcpdump if we started one
@@ -861,9 +911,13 @@ bool CURLBlaster::LaunchBrowser(void)
 				CloseDynaTrace();
 			}
 
+      OutputDebugString(_T("[UrlBlast] - Resetting IPFW"));
 			ResetIpfw();
 		}
 	}
+
+  // restore the cursor
+  ShowCursor(TRUE);
 	
 	return ret;
 }
@@ -912,13 +966,9 @@ void CURLBlaster::ConfigurePagetest(void)
 			val = pos.bottom;
 			RegSetValueEx(hKey, _T("Window Height"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
 
-			// pass it the IP address to use
-			RegDeleteValue(hKey, _T("Use Address"));
-			if( !ipAddress.IsEmpty() )
-				RegSetValueEx(hKey, _T("Use Address"), 0, REG_SZ, (const LPBYTE)(LPCTSTR)ipAddress, (ipAddress.GetLength() + 1) * sizeof(TCHAR));
-
 			// delete any old results from the reg key
 			RegDeleteValue(hKey, _T("Result"));
+			RegDeleteValue(hKey, _T("cpu"));
 
 			RegCloseKey(hKey);
 		}
@@ -973,14 +1023,9 @@ void CURLBlaster::ConfigurePagetest(void)
 				RegSetValueEx(hKey, _T("Cookies File"), 0, REG_SZ, (const LPBYTE)(LPCTSTR)info.cookiesFile, (info.cookiesFile.GetLength() + 1) * sizeof(TCHAR));			
 
 			RegSetValueEx(hKey, _T("EventName"), 0, REG_SZ, (const LPBYTE)(LPCTSTR)eventName, (eventName.GetLength() + 1) * sizeof(TCHAR));
-			RegSetValueEx(hKey, _T("LabID"), 0, REG_DWORD, (const LPBYTE)&labID, sizeof(labID));
-			RegSetValueEx(hKey, _T("DialerID"), 0, REG_DWORD, (const LPBYTE)&dialerID, sizeof(dialerID));
-			RegSetValueEx(hKey, _T("ConnectionType"), 0, REG_DWORD, (const LPBYTE)&connectionType, sizeof(connectionType));
 			RegSetValueEx(hKey, _T("Cached"), 0, REG_DWORD, (const LPBYTE)&isCached, sizeof(isCached));
 			RegSetValueEx(hKey, _T("URL"), 0, REG_SZ, (const LPBYTE)(LPCTSTR)info.url, (info.url.GetLength() + 1) * sizeof(TCHAR));
 			RegSetValueEx(hKey, _T("DOM Element ID"), 0, REG_SZ, (const LPBYTE)(LPCTSTR)info.domElement, (info.domElement.GetLength() + 1) * sizeof(TCHAR));
-			RegSetValueEx(hKey, _T("Experimental"), 0, REG_DWORD, (const LPBYTE)&experimental, sizeof(experimental));
-			RegSetValueEx(hKey, _T("Screen Shot Errors"), 0, REG_DWORD, (const LPBYTE)&screenShotErrors, sizeof(screenShotErrors));
 			RegSetValueEx(hKey, _T("Check Optimizations"), 0, REG_DWORD, (const LPBYTE)&info.checkOpt, sizeof(info.checkOpt));
       RegSetValueEx(hKey, _T("No Headers"), 0, REG_DWORD, (const LPBYTE)&info.noHeaders, sizeof(info.noHeaders));
       RegSetValueEx(hKey, _T("No Images"), 0, REG_DWORD, (const LPBYTE)&info.noImages, sizeof(info.noImages));
@@ -1010,12 +1055,10 @@ void CURLBlaster::ConfigurePagetest(void)
 				val = 1;
 			RegSetValueEx(hKey, _T("Capture Video"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
 
-		  RegSetValueEx(hKey, _T("AFT"), 0, REG_DWORD, (const LPBYTE)&info.aft, sizeof(info.aft));
-		  RegSetValueEx(hKey, _T("aftMinChanges"), 0, REG_DWORD, (const LPBYTE)&info.aftMinChanges, sizeof(info.aftMinChanges));
-		  RegSetValueEx(hKey, _T("aftEarlyCutoff"), 0, REG_DWORD, (const LPBYTE)&info.aftEarlyCutoff, sizeof(info.aftEarlyCutoff));
 		  RegSetValueEx(hKey, _T("pngScreenShot"), 0, REG_DWORD, (const LPBYTE)&info.pngScreenShot, sizeof(info.pngScreenShot));
 		  RegSetValueEx(hKey, _T("imageQuality"), 0, REG_DWORD, (const LPBYTE)&info.imageQuality, sizeof(info.imageQuality));
       RegSetValueEx(hKey, _T("bodies"), 0, REG_DWORD, (const LPBYTE)&info.bodies, sizeof(info.bodies));
+      RegSetValueEx(hKey, _T("htmlbody"), 0, REG_DWORD, (const LPBYTE)&info.htmlbody, sizeof(info.htmlbody));
       RegSetValueEx(hKey, _T("keepua"), 0, REG_DWORD, (const LPBYTE)&info.keepua, sizeof(info.keepua));
       RegSetValueEx(hKey, _T("minimumDuration"), 0, REG_DWORD, (const LPBYTE)&info.minimumDuration, sizeof(info.minimumDuration));
       RegSetValueEx(hKey, _T("customRules"), 0, REG_SZ, (const LPBYTE)(LPCTSTR)info.customRules, (info.customRules.GetLength() + 1) * sizeof(TCHAR));
@@ -1334,7 +1377,7 @@ void CURLBlaster::EncodeVideo(void)
 	{
 		lstrcpy(PathFindFileName(path), _T("x264.exe"));
 		CString exe(path);
-		CString cmd = CString(_T("\"")) + exe + _T("\" --crf 24 --threads 1 --keyint 10 --min-keyint 1 -o video.mp4 video.avs");
+		CString cmd = CString(_T("\"")) + exe + _T("\" --crf 24 --profile baseline --preset slow --threads 1 --keyint 10 --min-keyint 1 -o video.mp4 video.avs");
 
 		PROCESS_INFORMATION pi;
 		STARTUPINFO si;
@@ -1345,13 +1388,31 @@ void CURLBlaster::EncodeVideo(void)
 		log.Trace(_T("Executing '%s' in '%s'"), (LPCTSTR)cmd, (LPCTSTR)info.zipFileDir);
 		if( CreateProcess((LPCTSTR)exe, (LPTSTR)(LPCTSTR)cmd, 0, 0, FALSE, IDLE_PRIORITY_CLASS , 0, (LPCTSTR)info.zipFileDir, &si, &pi) )
 		{
-			WaitForSingleObject(pi.hProcess, 60 * 60 * 1000);
+			if (WaitForSingleObject(pi.hProcess, 5 * 60 * 1000) == WAIT_ABANDONED)
+			  TerminateProcess(pi.hProcess, 0);
 			CloseHandle(pi.hThread);
 			CloseHandle(pi.hProcess);
 			log.Trace(_T("Successfully ran '%s'"), (LPCTSTR)cmd);
 		}
 		else
 			log.Trace(_T("Execution failed '%s'"), (LPCTSTR)cmd);
+	}
+	
+	// terminate any stray x264.exe processes
+	WTS_PROCESS_INFO * proc = NULL;
+	DWORD count = 0;
+	if( WTSEnumerateProcesses(WTS_CURRENT_SERVER_HANDLE, 0, 1, &proc, &count) ) {
+		for( DWORD i = 0; i < count; i++ ) {
+			if( !lstrcmpi(PathFindFileName(proc[i].pProcessName), _T("x264.exe")) ) {
+				HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, proc[i].ProcessId);
+				if( hProc ) {
+					TerminateProcess(hProc, 0);
+					CloseHandle(hProc);
+				}
+			}
+		}
+		
+		WTSFreeMemory(proc);
 	}
 }
 

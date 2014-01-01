@@ -38,9 +38,6 @@ public:
     standards = 0;
     noscript = 0;
 	  blockads = 0;
-    aft = 0;
-    aftMinChanges = 0;
-    aftEarlyCutoff = 25;
     tcpdumpFile.Empty();
     testType.Empty();
     noOpt = 0;
@@ -49,10 +46,14 @@ public:
     pngScreenShot = 0;
     imageQuality = 0;
     bodies = 0;
+    htmlbody = 0;
     keepua = 0;
     minimumDuration=0;
     clearShortTermCacheSecs=0;
     currentRun = 0;
+    cached = false;
+    clearCerts = false;
+    cpu = 0;
     customRules.Empty();
 	}
 	
@@ -88,11 +89,14 @@ public:
   DWORD pngScreenShot;       // High-quality screen shot (png)
   DWORD imageQuality;       // Quality of jpeg images
   DWORD bodies;             // save the content of text responses?
+  DWORD htmlbody;           // save the content of only the base HTML response
   DWORD minimumDuration;    // minimum test duration
   DWORD clearShortTermCacheSecs;  // in repeat view, delete objects with a expires of less than X seconds
   DWORD keepua;             // preserve the original User Agent string
   CString customRules;      // custom rule set (newline delimited)
   DWORD currentRun;
+  bool cached;              // are we testing a cached run?
+  bool clearCerts;          // do we need to clear the OS certificate cache?
 
 	DWORD	bwIn;				    // bandwidth in
 	DWORD	bwOut;				  // bandwidth out
@@ -104,9 +108,7 @@ public:
   DWORD noscript;
   DWORD  blockads;
   CString tcpdumpFile;
-  DWORD aft;            // above-the-fold time
-  DWORD aftEarlyCutoff;
-  DWORD aftMinChanges;
+  DWORD cpu;
 
 	DWORD	reserved;			  // reserved for internal use
 	void *	context;			// contect information for internal use
@@ -124,7 +126,6 @@ public:
 	virtual void Stop(void){}
 
 	virtual bool GetNextUrl(CTestInfo &info) = 0;
-	virtual void HarvestedLinks(CTestInfo &info){}
 	virtual bool RunRepeatView(CTestInfo &info){return true;}
 	virtual void UrlFinished(CTestInfo &info){}
 	virtual void GetStatus(CString &status){}

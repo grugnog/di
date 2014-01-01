@@ -40,6 +40,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "screen_capture.h"
 #include "test_server.h"
 #include "wpt_test_hook.h"
+#include "dev_tools.h"
+#include "trace.h"
 
 extern HINSTANCE global_dll_handle; // DLL handle
 
@@ -57,29 +59,40 @@ public:
   void OnAllDOMElementsLoaded(DWORD load_time);
   void SetDomContentLoadedEvent(DWORD start, DWORD end);
   void SetLoadEvent(DWORD start, DWORD end);
+  void SetFirstPaint(DWORD first_paint);
   void OnLoad();
   void OnNavigate();
+  void OnNavigateComplete();
+  void Report();
+  void OnReport();
+
+  // hook interfaces (for marshalling to the processing thread)
+  void SendPaintEvent(int x, int y, int width, int height);
 
 private:
-  CGDIHook  _gdi_hook;
-  CWsHook   _winsock_hook;
-  NsprHook  _nspr_hook;
-  SchannelHook  _schannel_hook;
-  WinInetHook _wininet_hook;
-  HANDLE    _background_thread;
-  HANDLE    _background_thread_started;
-  HWND      _message_window;
-  CString   _file_base;
-  bool      _done;
+  CGDIHook  gdi_hook_;
+  CWsHook   winsock_hook_;
+  NsprHook  nspr_hook_;
+  SchannelHook  schannel_hook_;
+  WinInetHook wininet_hook_;
+  HANDLE    background_thread_;
+  HANDLE    background_thread_started_;
+  HWND      message_window_;
+  CString   file_base_;
+  bool      done_;
+  bool      reported_;
+  UINT      report_message_;
 
   // winsock event tracking
-  TrackDns      _dns;
-  TrackSockets  _sockets;
-  Requests      _requests;
+  TrackDns      dns_;
+  TrackSockets  sockets_;
+  Requests      requests_;
 
-  TestState     _test_state;
-  Results       _results;
-  ScreenCapture _screen_capture;
-  TestServer    _test_server;
-  WptTestHook   _test;
+  TestState     test_state_;
+  Results       results_;
+  ScreenCapture screen_capture_;
+  TestServer    test_server_;
+  WptTestHook   test_;
+  DevTools      dev_tools_;
+  Trace         trace_;
 };

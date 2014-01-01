@@ -335,7 +335,9 @@ Request::Request(TestState& test_state, DWORD socket_id,
   , _data_sent(false)
   , _from_browser(false)
   , _is_base_page(false)
-  , requests_(requests) {
+  , requests_(requests)
+  , _bytes_in(0)
+  , _bytes_out(0) {
   QueryPerformanceCounter(&_start);
   _first_byte.QuadPart = 0;
   _end.QuadPart = 0;
@@ -346,6 +348,7 @@ Request::Request(TestState& test_state, DWORD socket_id,
   _ssl_start.QuadPart = 0;
   _ssl_end.QuadPart = 0;
   _peer_address = sockets.GetPeerAddress(socket_id);
+  _local_port = sockets.GetLocalPort(socket_id);
   _is_ssl = _sockets.IsSslById(socket_id);
   InitializeCriticalSection(&cs);
 
@@ -369,10 +372,11 @@ void Request::DataIn(DataChunk& chunk) {
   EnterCriticalSection(&cs);
   if (_is_active) {
     QueryPerformanceCounter(&_end);
-    if (!_first_byte.QuadPart) {
+    _test_state.received_data_ = true;
+    if (!_first_byte.QuadPart)
       _first_byte.QuadPart = _end.QuadPart;
-    }
     if (!_is_spdy) {
+      _bytes_in += chunk.GetLength();
       _response_data.AddChunk(chunk);
     }
   }
@@ -408,6 +412,7 @@ void Request::DataOut(DataChunk& chunk) {
   if (_is_active && !_is_spdy) {
     // Keep track of the data that was actually sent.
     unsigned long chunk_len = chunk.GetLength();
+    _bytes_out += chunk_len;
     if (chunk_len > 0) {
       if (!_are_headers_complete &&
           chunk_len >= 4 && strstr(chunk.GetData(), "\r\n\r\n")) {
@@ -465,7 +470,6 @@ bool Request::Process() {
         }
       }
     } else {
-
       // Find the matching socket connect and DNS lookup (if they exist).
       LARGE_INTEGER before = _start;
       LARGE_INTEGER start, end, ssl_start, ssl_end;
@@ -481,25 +485,15 @@ bool Request::Process() {
         _ms_ssl_start = _test_state.ElapsedMsFromStart(ssl_start);
         _ms_ssl_end = _test_state.ElapsedMsFromStart(ssl_end);
       }
-
-      // Update the overall stats.
-      _test_state._bytes_out += _request_data.GetDataSize();
-      _test_state._bytes_in += _response_data.GetDataSize();
-      if (_start.QuadPart <= _test_state._on_load.QuadPart) {
-        _test_state._doc_bytes_in += _response_data.GetDataSize();
-        _test_state._doc_bytes_out += _request_data.GetDataSize();
-      }
     }
 
     _test_state._requests++;
-    if (_start.QuadPart <= _test_state._on_load.QuadPart) {
+    if (_start.QuadPart <= _test_state._on_load.QuadPart)
       _test_state._doc_requests++;
-    }
     int result = GetResult();
     if (!_test_state._first_byte.QuadPart && result == 200 && 
-        _first_byte.QuadPart ) {
+        _first_byte.QuadPart )
       _test_state._first_byte.QuadPart = _first_byte.QuadPart;
-    }
     if (result >= 400 || result < 0) {
       if (_test_state._test_result == TEST_RESULT_NO_ERROR)
         _test_state._test_result = TEST_RESULT_CONTENT_ERROR;
@@ -508,9 +502,8 @@ bool Request::Process() {
     }
 
     CStringA user_agent = GetRequestHeader("User-Agent");
-    if (user_agent.GetLength()) {
+    if (user_agent.GetLength())
       _test_state._user_agent = CA2T(user_agent);
-    }
 
     // see if we have a matching request with browser data
     CString url = _T("http://");

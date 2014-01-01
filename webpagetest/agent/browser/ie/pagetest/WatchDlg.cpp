@@ -38,6 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 CWatchDlg * dlg = NULL;
 DWORD refCount = 0;
+DWORD tlsIndex = TLS_OUT_OF_INDEXES;
 
 // Colors used for the UI
 const COLORREF colorPage			= RGB(255,220,220);
@@ -476,6 +477,7 @@ void CWatchDlg::CreateDlg(void)
 	{
 		ATLTRACE(_T("[Pagetest] - ***** CWatchDlg::CreateDlg - creating dlg\n"));
 		
+		tlsIndex = TlsAlloc();
 		CWatchDlg * tmp;
 		tmp = new CWatchDlg();
 		tmp->Create();
@@ -503,7 +505,7 @@ void CWatchDlg::DestroyDlg(void)
 		{
 			tmp->reportSt = QUIT_NOEND;
 			if ( !tmp->end )
-				QueryPerformanceCounter((LARGE_INTEGER *)&(tmp->end));
+				QueryPerfCounter(tmp->end);
 
 			tmp->FlushResults();
 		}
@@ -1795,7 +1797,7 @@ void CWatchDlg::CheckStuff(void)
 
 	// only check every 50 ms at most to avoid pounding the browser
 	__int64 now;
-	QueryPerformanceCounter((LARGE_INTEGER *)&now);
+	QueryPerfCounter(now);
 	if( now < lastCheck || (now - lastCheck) / msFreq > 50 )
 	{
 		// post messages to all of the thread windows

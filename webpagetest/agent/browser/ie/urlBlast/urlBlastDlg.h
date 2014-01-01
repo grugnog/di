@@ -28,7 +28,6 @@ protected:
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
 	afx_msg LRESULT OnUpdateUI(WPARAM wParal, LPARAM lParam);
-	afx_msg LRESULT OnContinueStartup(WPARAM wParal, LPARAM lParam);
 	DECLARE_MESSAGE_MAP()
 	virtual void OnCancel();
 	virtual void OnOK();
@@ -36,14 +35,18 @@ protected:
 public:
 	afx_msg void OnClose();
 	CStatic status;
-	afx_msg void OnTimer(UINT_PTR nIDEvent);
-	void ClearCaches(void);
+	void ThreadProc(void);
+	void SetStatus(CString status);
+	void Alive();
 
 protected:
 	void DoStartup(void);
-	CArray<CURLBlaster *> workers;
-	void KillWorkers(void);
+	CURLBlaster * worker;
+	void KillWorker(void);
   void InstallFlash();
+  void CheckAlive();
+  HANDLE hRunningThread;
+  HANDLE hMustExit;
 
 	CStatic rate;
 	__int64 start;
@@ -56,34 +59,19 @@ protected:
 	__int64 lastKernelTime;
 	__int64 lastUserTime;
 	__int64 lastUpload;
+	__int64 lastAlive;
+	CRITICAL_SECTION cs;
 
 	CString logFile;
 	int startupDelay;
-	int threadCount;
 	int testID;
 	int configID;
 	DWORD timeout;
-	CString aliveFile;
-	CString urlFilesDir;
-	int testType;
-	int rebootInterval;
-	int clearCacheInterval;
-	DWORD screenShotErrors;
 	DWORD checkOpt;
-	CStatic rebooting;
-	DWORD labID;
-	DWORD dialerID;
-	DWORD connectionType;
-	int uploadLogsInterval;
-	CStringArray uploadLogFiles;
-	CStringArray addresses;
 	CLog	log;
 	bool	running;
-	DWORD	minInterval;
 	CString customEventText;
 	bool bDrWatson;
-	DWORD	ifIndex;			// interface to add IP addresses to
-	CList<ULONG>	ipContexts;	// added IP address contexts we need to delete when we exit
 	CString	accountBase;
 	CString	password;
 	CString preLaunch;
@@ -103,23 +91,16 @@ protected:
   DWORD clearShortTermCacheSecs;
   CIpfw ipfw;
   HANDLE testingMutex;
+  CString m_status;
 
 	void LoadSettings(void);
 	CUrlManager urlManager;
 	CString computerName;
-	bool CheckReboot(bool force = false);
-	void WriteAlive(void);
-	void CheckUploadLogs(void);
-	void UploadLogs(void);
 	void KillProcs(void);
   void ClearTemp(void);
 
 	void CloseDialogs(void);
-	DWORD experimental;
-	void CheckExit(void);
-	void DisableDNSCache(void);
   void StopService(CString serviceName);
-	void Defrag(void);
 	void SetupScreen(void);
 	void GetEC2Config();
 	bool GetUrlText(CString url, CString &response);

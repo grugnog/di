@@ -28,15 +28,21 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "StdAfx.h"
 #include "wpt_settings.h"
+#include "wpt_status.h"
 #include <WinInet.h>
+#include "zlib/contrib/minizip/unzip.h"
+
+bool Unzip(CString file, CStringA dir);
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-WptSettings::WptSettings(void):
+WptSettings::WptSettings(WptStatus &status):
   _timeout(DEFAULT_TEST_TIMEOUT)
   ,_startup_delay(DEFAULT_STARTUP_DELAY)
   ,_polling_delay(DEFAULT_POLLING_DELAY)
-  ,_debug(0) {
+  ,_debug(0)
+  ,_status(status)
+  ,_software_update(status) {
 }
 
 /*-----------------------------------------------------------------------------
@@ -50,7 +56,7 @@ WptSettings::~WptSettings(void) {
 bool WptSettings::Load(void) {
   bool ret = false;
 
-  TCHAR buff[1024];
+  TCHAR buff[10240];
   TCHAR iniFile[MAX_PATH];
   TCHAR logFile[MAX_PATH];
   iniFile[0] = 0;
@@ -60,6 +66,14 @@ bool WptSettings::Load(void) {
   lstrcpy(logFile, iniFile);
   lstrcpy( PathFindFileName(logFile), _T("wpt.log") );
   DeleteFile(logFile);
+
+  if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_APPDATA | CSIDL_FLAG_CREATE,
+                                NULL, SHGFP_TYPE_CURRENT, buff))) {
+    PathAppend(buff, _T("webpagetest_clients"));
+    _clients_directory = buff;
+    SHCreateDirectoryEx(NULL, _clients_directory, NULL);
+    _clients_directory += _T("\\");
+  }
 
   // Load the server settings (WebPagetest Web Server)
   if (GetPrivateProfileString(_T("WebPagetest"), _T("Url"), _T(""), buff, 
@@ -132,7 +146,10 @@ void WptSettings::LoadFromEC2(void) {
           if (key.GetLength() && value.GetLength()) {
             if (!key.CompareNoCase(_T("wpt_server")))
               _server = CString(_T("http://")) + value + _T("/");
-            else if (!key.CompareNoCase(_T("wpt_location")))
+            else if (!key.CompareNoCase(_T("wpt_loc")))
+              _location = value; 
+            else if (_location.IsEmpty() &&
+                     !key.CompareNoCase(_T("wpt_location")))
               _location = value + _T("_wptdriver"); 
             else if (!key.CompareNoCase(_T("wpt_key")) )
               _key = value; 
@@ -142,6 +159,18 @@ void WptSettings::LoadFromEC2(void) {
         }
       }
     } while (pos > 0);
+    if (_location.IsEmpty()) {
+      CString zone;
+      if (GetUrlText(_T("http://169.254.169.254/latest/meta-data")
+                     _T("/placement/availability-zone"), zone)) {
+        int pos = zone.Find('-');
+        if (pos > 0) {
+          pos = zone.Find('-', pos + 1);
+          if (pos > 0)
+            _location = CString(_T("ec2-")) + zone.Left(pos).Trim();
+        }
+      }
+    }
   }
 
   GetUrlText(_T("http://169.254.169.254/latest/meta-data/instance-id"), 
@@ -193,17 +222,27 @@ bool WptSettings::GetUrlText(CString url, CString &response)
   (this will be done on every test run in order to support 
   multi-browser testing)
 -----------------------------------------------------------------------------*/
-bool WptSettings::SetBrowser(CString browser) {
-  TCHAR buff[1024];
-  if (!browser.GetLength()) {
-    browser = _T("chrome");  // default to "chrome" to support older ini file
-    if (GetPrivateProfileString(_T("WebPagetest"), _T("browser"), _T(""), buff,
-      _countof(buff), _ini_file )) {
-      browser = buff;
+bool WptSettings::SetBrowser(CString browser, CString url,
+                             CString md5, CString client) {
+  bool ret = false;
+
+  _browser.CleanupCustomBrowsers(browser);
+
+  if (!url.IsEmpty() && !md5.IsEmpty()) {
+    // we are running a custom chrome browser
+    ret = _browser.Install(browser, url, md5);
+  } else {
+    // try loading the settings for the specified browser
+    TCHAR buff[1024];
+    if (!browser.GetLength()) {
+      browser = _T("chrome");  // default to "chrome" to support older ini file
+      if (GetPrivateProfileString(_T("WebPagetest"), _T("browser"), _T(""), buff,
+        _countof(buff), _ini_file )) {
+        browser = buff;
+      }
     }
+    ret = _browser.Load(browser, _ini_file, client);
   }
-  // try loading the settings for the specified browser
-  bool ret = _browser.Load(browser, _ini_file);
   return ret;
 }
 
@@ -223,14 +262,17 @@ bool WptSettings::ReInstallBrowser() {
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-bool BrowserSettings::Load(const TCHAR * browser, const TCHAR * iniFile) {
+bool BrowserSettings::Load(const TCHAR * browser, const TCHAR * iniFile,
+                           CString client) {
   bool ret = false;
-  TCHAR buff[4096];
+  TCHAR buff[10240];
   _browser = browser;
   _template = _browser;
   _exe.Empty();
   _exe_directory.Empty();
   _options.Empty();
+
+  AtlTrace(_T("Loading settings for %s"), (LPCTSTR)browser);
 
   GetModuleFileName(NULL, buff, _countof(buff));
   *PathFindFileName(buff) = NULL;
@@ -246,6 +288,8 @@ bool BrowserSettings::Load(const TCHAR * browser, const TCHAR * iniFile) {
     PathAppend(buff, _T("webpagetest_profiles\\"));
     _profile_directory = buff;
   }
+  if (client.GetLength())
+    _profile_directory += client + _T("-client-");
   _profile_directory += browser;
   if (GetPrivateProfileString(browser, _T("cache"), _T(""), buff, 
     _countof(buff), iniFile )) {
@@ -298,9 +342,108 @@ bool BrowserSettings::Load(const TCHAR * browser, const TCHAR * iniFile) {
 }
 
 /*-----------------------------------------------------------------------------
+  Download and install a custom Chrome build
+-----------------------------------------------------------------------------*/
+bool BrowserSettings::Install(CString browser, CString url, CString md5) {
+  bool ret = false;
+  TCHAR buff[10240];
+  _browser = browser;
+  _template = _browser;
+  _exe.Empty();
+  _exe_directory.Empty();
+  _options.Empty();
+
+  AtlTrace(_T("Checking custom browser: %s"), (LPCTSTR)browser);
+
+  GetModuleFileName(NULL, buff, _countof(buff));
+  *PathFindFileName(buff) = NULL;
+  _wpt_directory = buff;
+  _wpt_directory.Trim(_T("\\"));
+  CString browsers_directory = _wpt_directory + CString(_T("\\browsers"));
+  CreateDirectory(browsers_directory, NULL);
+  _exe_directory = browsers_directory + CString(_T("\\")) + browser;
+  CreateDirectory(_exe_directory, NULL);
+  _exe = _exe_directory + _T("\\chrome.exe");
+
+  GetStandardDirectories();
+
+  // create a profile directory for the given browser
+  _profile_directory = _wpt_directory + _T("\\profiles\\");
+  if (!app_data_dir_.IsEmpty()) {
+    lstrcpy(buff, app_data_dir_);
+    PathAppend(buff, _T("webpagetest_profiles\\"));
+    _profile_directory = buff;
+  }
+  _profile_directory += browser;
+
+  _options = _T("--load-extension=\"%WPTDIR%\\extension\" ")
+             _T("--user-data-dir=\"%PROFILE%\" ")
+             _T("--no-proxy-server");
+  _options.Replace(_T("%WPTDIR%"), _wpt_directory);
+  _options.Replace(_T("%PROFILE%"), _profile_directory);
+
+  if (FileExists(_exe)) {
+    // update the last used time for the custom browser
+    HANDLE hFile = CreateFile(_exe_directory, FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+    if (hFile != INVALID_HANDLE_VALUE) {
+      FILETIME ft;
+      GetSystemTimeAsFileTime(&ft);
+      SetFileTime(hFile, NULL, NULL, &ft);
+      CloseHandle(hFile);
+    }
+    ret = true;
+  } else {
+    CString browser_zip = _exe_directory + _T(".zip");
+    if (HttpSaveFile(url, browser_zip) &&
+        !HashFileMD5(browser_zip).CompareNoCase(md5) &&
+        Unzip(browser_zip, (LPCSTR)CT2A(_exe_directory)) &&
+        FileExists(_exe))
+      ret = true;
+    else
+      DeleteDirectory(_exe_directory);
+    DeleteFile(browser_zip);
+  }
+
+  return ret;
+}
+
+/*-----------------------------------------------------------------------------
+  Check all of the custom browsers and delete any that haven't been used
+  recently (except for the specified browser)
+-----------------------------------------------------------------------------*/
+void BrowserSettings::CleanupCustomBrowsers(CString browser) {
+  TCHAR buff[10240];
+  GetModuleFileName(NULL, buff, _countof(buff));
+  *PathFindFileName(buff) = NULL;
+  _wpt_directory = buff;
+  _wpt_directory.Trim(_T("\\"));
+  CString browsers_directory = _wpt_directory + CString(_T("\\browsers"));
+  WIN32_FIND_DATA fd;
+  HANDLE hFind = FindFirstFile(browsers_directory + _T("\\*.*"), &fd);
+  FILETIME now;
+  GetSystemTimeAsFileTime(&now);
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (lstrcmp(fd.cFileName, _T(".")) &&
+          lstrcmp(fd.cFileName, _T("..")) &&
+          lstrcmp(fd.cFileName, browser) &&
+          fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if (ElapsedFileTimeSeconds(fd.ftLastWriteTime, now) > 86400)
+          DeleteDirectory(browsers_directory +
+                          CString(_T("\\")) + fd.cFileName);
+      } else if (!CString(fd.cFileName).Right(4).CompareNoCase(_T(".zip"))) {
+        // delete all of the zip files
+        DeleteFile(browsers_directory + CString(_T("\\")) + fd.cFileName);
+      }
+    } while(FindNextFile(hFind, &fd));
+  }
+}
+
+/*-----------------------------------------------------------------------------
   Reset the browser user profile (nuke the directory, copy the template over)
 -----------------------------------------------------------------------------*/
-void BrowserSettings::ResetProfile() {
+void BrowserSettings::ResetProfile(bool clear_certs) {
   // clear the browser-specific profile directory
   if (_cache_directory.GetLength()) {
     DeleteDirectory(_cache_directory, false);
@@ -313,28 +456,51 @@ void BrowserSettings::ResetProfile() {
   }
 
   // flush the certificate revocation caches
-  LaunchProcess(_T("certutil.exe -urlcache * delete"));
-  LaunchProcess(
-      _T("certutil.exe -setreg chain\\ChainCacheResyncFiletime @now"));
+  if (clear_certs) {
+    LaunchProcess(_T("certutil.exe -urlcache * delete"));
+    LaunchProcess(
+        _T("certutil.exe -setreg chain\\ChainCacheResyncFiletime @now"));
+  }
 
   // Clear the various IE caches that we know about
-  DeleteRegKey(HKEY_CURRENT_USER, 
-      _T("Software\\Microsoft\\Internet Explorer\\LowRegistry\\DOMStorage"),
-      false);
-  DeleteRegKey(HKEY_CURRENT_USER,
-      _T("Software\\Microsoft\\Internet Explorer\\DOMStorage"),
-      false);
-  DeleteDirectory(cookies_dir_, false);
-  DeleteDirectory(history_dir_, false);
-  DeleteDirectory(dom_storage_dir_, false);
-  DeleteDirectory(temp_files_dir_, false);
-  DeleteDirectory(temp_dir_, false);
-  DeleteDirectory(silverlight_dir_, false);
-  DeleteDirectory(recovery_dir_, false);
-  DeleteDirectory(flash_dir_, false);
-  DeleteDirectory(windows_dir_ + _T("\\temp"), false);
-  ClearWinInetCache();
-  ClearWebCache();
+  CString match = _exe;
+  if (match.MakeLower().Find(_T("iexplore.exe")) >= 0) {
+    DeleteRegKey(HKEY_CURRENT_USER, 
+        _T("Software\\Microsoft\\Internet Explorer\\LowRegistry\\DOMStorage"),
+        false);
+    DeleteRegKey(HKEY_CURRENT_USER,
+        _T("Software\\Microsoft\\Internet Explorer\\DOMStorage"),
+        false);
+    DeleteDirectory(cookies_dir_, false);
+    DeleteDirectory(history_dir_, false);
+    DeleteDirectory(dom_storage_dir_, false);
+    DeleteDirectory(temp_files_dir_, false);
+    DeleteDirectory(temp_dir_, false);
+    DeleteDirectory(silverlight_dir_, false);
+    DeleteDirectory(recovery_dir_, false);
+    DeleteDirectory(flash_dir_, false);
+    DeleteDirectory(windows_dir_ + _T("\\temp"), false);
+    ClearWinInetCache();
+    ClearWebCache();
+  }
+
+  // delete any .tmp files in our directory or the root directory of the drive.
+  // Not sure where they are coming from but they collect over time.
+  WIN32_FIND_DATA fd;
+  HANDLE find = FindFirstFile(_wpt_directory + _T("\\*.tmp"), &fd);
+  if (find != INVALID_HANDLE_VALUE) {
+    do {
+      DeleteFile(_wpt_directory + CString(_T("\\")) + fd.cFileName);
+    } while(FindNextFile(find, &fd));
+    FindClose(find);
+  }
+  find = FindFirstFile(_T("C:\\*.tmp"), &fd);
+  if (find != INVALID_HANDLE_VALUE) {
+    do {
+      DeleteFile(CString(_T("C:\\")) + fd.cFileName);
+    } while(FindNextFile(find, &fd));
+    FindClose(find);
+  }
 }
 
 /*-----------------------------------------------------------------------------
@@ -519,6 +685,27 @@ void BrowserSettings::ClearWinInetCache() {
   }
   if (info)
     free(info);
+
+  // This magic value is the combination of the following bitflags:
+  // #define CLEAR_HISTORY         0x0001 // Clears history
+  // #define CLEAR_COOKIES         0x0002 // Clears cookies
+  // #define CLEAR_CACHE           0x0004 // Clears Temporary Internet Files folder
+  // #define CLEAR_CACHE_ALL       0x0008 // Clears offline favorites and download history
+  // #define CLEAR_FORM_DATA       0x0010 // Clears saved form data for form auto-fill-in
+  // #define CLEAR_PASSWORDS       0x0020 // Clears passwords saved for websites
+  // #define CLEAR_PHISHING_FILTER 0x0040 // Clears phishing filter data
+  // #define CLEAR_RECOVERY_DATA   0x0080 // Clears webpage recovery data
+  // #define CLEAR_PRIVACY_ADVISOR 0x0800 // Clears tracking data
+  // #define CLEAR_SHOW_NO_GUI     0x0100 // Do not show a GUI when running the cache clearing
+  //
+  // Bitflags available but not used in this magic value are as follows:
+  // #define CLEAR_USE_NO_THREAD      0x0200 // Do not use multithreading for deletion
+  // #define CLEAR_PRIVATE_CACHE      0x0400 // Valid only when browser is in private browsing mode
+  // #define CLEAR_DELETE_ALL         0x1000 // Deletes data stored by add-ons
+  // #define CLEAR_PRESERVE_FAVORITES 0x2000 // Preserves cached data for "favorite" websites
+
+  // Use the command-line version of cache clearing in case WinInet didn't work
+  LaunchProcess(_T("RunDll32.exe InetCpl.cpl,ClearMyTracksByProcess 6655"));
 }
 
 /*-----------------------------------------------------------------------------
@@ -543,4 +730,59 @@ void BrowserSettings::ClearWebCache() {
   }
 
   DeleteDirectory(webcache_dir_, false);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+static bool Unzip(CString file, CStringA dir) {
+  bool ret = false;
+
+  dir = dir.Trim("\\") + "\\";
+  unzFile zip_file_handle = unzOpen(CT2A(file));
+  if (zip_file_handle) {
+    ret = true;
+    if (unzGoToFirstFile(zip_file_handle) == UNZ_OK) {
+      DWORD len = 4096;
+      LPBYTE buff = (LPBYTE)malloc(len);
+      if (buff) {
+        do {
+          char file_name[MAX_PATH];
+          unz_file_info info;
+          if (unzGetCurrentFileInfo(zip_file_handle, &info, (char *)&file_name,
+              _countof(file_name), 0, 0, 0, 0) == UNZ_OK) {
+              CStringA dest_file_name = dir + file_name;
+
+            // make sure the directory exists
+            char szDir[MAX_PATH];
+            lstrcpyA(szDir, (LPCSTR)dest_file_name);
+            *PathFindFileNameA(szDir) = 0;
+            if( lstrlenA(szDir) > 3 )
+              SHCreateDirectoryExA(NULL, szDir, NULL);
+
+            HANDLE dest_file = CreateFileA(dest_file_name, GENERIC_WRITE, 0, 
+                                          NULL, CREATE_ALWAYS, 0, 0);
+            if (dest_file != INVALID_HANDLE_VALUE) {
+              if (unzOpenCurrentFile(zip_file_handle) == UNZ_OK) {
+                int bytes = 0;
+                DWORD written;
+                do {
+                  bytes = unzReadCurrentFile(zip_file_handle, buff, len);
+                  if( bytes > 0 )
+                    WriteFile( dest_file, buff, bytes, &written, 0);
+                } while( bytes > 0 );
+                unzCloseCurrentFile(zip_file_handle);
+              }
+              CloseHandle( dest_file );
+            }
+          }
+        } while (unzGoToNextFile(zip_file_handle) == UNZ_OK);
+
+        free(buff);
+      }
+    }
+
+    unzClose(zip_file_handle);
+  }
+
+  return ret;
 }

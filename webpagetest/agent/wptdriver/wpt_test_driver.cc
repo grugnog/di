@@ -3,10 +3,10 @@
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-WptTestDriver::WptTestDriver(DWORD default_timeout)
-{
+WptTestDriver::WptTestDriver(DWORD default_timeout, bool has_gpu) {
   _test_timeout = default_timeout;
   _measurement_timeout = default_timeout;
+  has_gpu_ = has_gpu;
 }
 
 /*-----------------------------------------------------------------------------
@@ -31,6 +31,8 @@ bool WptTestDriver::Start() {
       SetFileBase();
       SetClearedCache(_clear_cache);
       SetCurrentRun(_run);
+      SetCPUUtilization(0);
+      SetHasGPU(has_gpu_);
       ret = true;
     }
   }
@@ -48,6 +50,7 @@ bool WptTestDriver::Load(CString& test) {
     DeleteDirectory(_directory, false);
 
   if (ret) {
+    BuildScript();
     HANDLE file = CreateFile(_test_file, GENERIC_WRITE, 0, 0, CREATE_ALWAYS,
                               0, 0);
     if (file != INVALID_HANDLE_VALUE) {

@@ -33,26 +33,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "request.h"
 #include "test_state.h"
 #include "track_sockets.h"
+#include "wpt_test_hook.h"
 
 #include "hook_nspr.h"
 
 static NsprHook* g_hook = NULL;
 
-// Save trampolined SSL_ImportFD for Chrome_SSL_ImportFD_Hook.
-typedef PRFileDesc* (*PFN_Chrome_SSL_ImportFD)(void);
-static PFN_Chrome_SSL_ImportFD g_ssl_importfd = NULL;
-
 // Stub Functions
-
-PRFileDesc* Chrome_SSL_ImportFD_Hook() {
-  // This is a special hook for Chrome-only. Chrome optimizes the parameter
-  // passing such that is it non-standard. Leave the parameters untouched.
-  // We only care about the return value.
-  PRFileDesc* fd = g_ssl_importfd();
-  g_hook->SetSslFd(fd);
-  return fd;
-}
-
 PRFileDesc* SSL_ImportFD_Hook(PRFileDesc *model, PRFileDesc *fd) {
   return g_hook->SSL_ImportFD(model, fd);
 }
@@ -69,18 +56,35 @@ PRInt32 PR_Read_Hook(PRFileDesc *fd, void *buf, PRInt32 amount) {
   return g_hook->PR_Read(fd, buf, amount);
 }
 
+SECStatus SSL_SetURL_Hook(PRFileDesc *fd, const char *url) {
+  return g_hook->SSL_SetURL(fd, url);
+}
+
+/*-----------------------------------------------------------------------------
+  Ignore all certificate errors by forcing all certificate validations
+  to succeed.
+-----------------------------------------------------------------------------*/
+SECStatus PR_CALLBACK AuthenticateCertificate(void *arg,
+    PRFileDesc *fd, PRBool checkSig, PRBool isServer) {
+  return SECSuccess;
+}
+
 // end of C hook functions
 
 
-NsprHook::NsprHook(TrackSockets& sockets, TestState& test_state) :
+NsprHook::NsprHook(TrackSockets& sockets, TestState& test_state,
+                   WptTestHook& test) :
     _sockets(sockets),
     _test_state(test_state),
+    _test(test),
     _hook(NULL), 
     _SSL_ImportFD(NULL),
     _PR_Close(NULL),
     _PR_Read(NULL),
     _PR_Write(NULL),
-    _PR_FileDesc2NativeHandle(NULL) {
+    _PR_FileDesc2NativeHandle(NULL),
+    _SSL_AuthCertificateHook(NULL),
+    _SSL_SetURL(NULL) {
 }
 
 NsprHook::~NsprHook() {
@@ -96,19 +100,52 @@ void NsprHook::Init() {
   }
   _hook = new NCodeHookIA32();
   g_hook = this; 
+
   GetFunctionByName(
+      "nss3.dll", "PR_FileDesc2NativeHandle", _PR_FileDesc2NativeHandle);
+  if (!_PR_FileDesc2NativeHandle)
+    GetFunctionByName(
       "nspr4.dll", "PR_FileDesc2NativeHandle", _PR_FileDesc2NativeHandle);
+
   if (_PR_FileDesc2NativeHandle != NULL) {
     // Hook Firefox.
     WptTrace(loglevel::kProcess, _T("[wpthook] NsprHook::Init()\n"));
+
     _SSL_ImportFD = _hook->createHookByName(
-        "ssl3.dll", "SSL_ImportFD", SSL_ImportFD_Hook);
+        "nss3.dll", "SSL_ImportFD", SSL_ImportFD_Hook);
+    if (!_SSL_ImportFD)
+      _SSL_ImportFD = _hook->createHookByName(
+          "ssl3.dll", "SSL_ImportFD", SSL_ImportFD_Hook);
+
     _PR_Close = _hook->createHookByName(
-        "nspr4.dll", "PR_Close", PR_Close_Hook);
+        "nss3.dll", "PR_Close", PR_Close_Hook);
+    if (!_PR_Close)
+      _PR_Close = _hook->createHookByName(
+          "nspr4.dll", "PR_Close", PR_Close_Hook);
+
     _PR_Write = _hook->createHookByName(
-        "nspr4.dll", "PR_Write", PR_Write_Hook);
+        "nss3.dll", "PR_Write", PR_Write_Hook);
+    if (!_PR_Write)
+      _PR_Write = _hook->createHookByName(
+          "nspr4.dll", "PR_Write", PR_Write_Hook);
+
     _PR_Read = _hook->createHookByName(
-        "nspr4.dll", "PR_Read", PR_Read_Hook);
+        "nss3.dll", "PR_Read", PR_Read_Hook);
+    if (!_PR_Read)
+      _PR_Read = _hook->createHookByName(
+          "nspr4.dll", "PR_Read", PR_Read_Hook);
+
+    GetFunctionByName(
+        "nss3.dll", "SSL_AuthCertificateHook", _SSL_AuthCertificateHook);
+    if (!_SSL_AuthCertificateHook)
+      GetFunctionByName(
+          "ssl3.dll", "SSL_AuthCertificateHook", _SSL_AuthCertificateHook);
+
+    _SSL_SetURL = _hook->createHookByName(
+      "nss3.dll", "SSL_SetURL", SSL_SetURL_Hook);
+    if (!_SSL_SetURL)
+      _SSL_SetURL = _hook->createHookByName(
+        "ssl3.dll", "SSL_SetURL", SSL_SetURL_Hook);
   }
 }
 
@@ -123,9 +160,8 @@ PRFileDesc* NsprHook::SSL_ImportFD(PRFileDesc *model, PRFileDesc *fd) {
     ret = _SSL_ImportFD(model, fd);
     if (ret != NULL) {
       _sockets.SetSslFd(ret);
-      if (_PR_FileDesc2NativeHandle) {
+      if (_PR_FileDesc2NativeHandle)
         _sockets.SetSslSocket(_PR_FileDesc2NativeHandle(ret));
-      }
     }
   }
   return ret;
@@ -182,10 +218,20 @@ template <typename U>
 void NsprHook::GetFunctionByName(
     const string& dll_name, const string& function_name, U& function_ptr) {
   HMODULE dll = LoadLibraryA(dll_name.c_str());
-  if (dll) {
+  if (dll)
     function_ptr = (U)GetProcAddress(dll, function_name.c_str());
-    FreeLibrary(dll);
-  } else {
+  else
     function_ptr = NULL;
-  }
+}
+
+SECStatus NsprHook::SSL_SetURL(PRFileDesc *fd, const char *url) {
+  SECStatus ret = SECFailure;
+  // Force our own certificate validator in the path.
+  // This call is made after Firefox sets their auth hook so we
+  // just override theirs
+  if (_test._ignore_ssl && _SSL_AuthCertificateHook != NULL)
+    _SSL_AuthCertificateHook(fd, AuthenticateCertificate, NULL);
+  if (_SSL_SetURL)
+    ret = _SSL_SetURL(fd, url);
+  return ret;
 }

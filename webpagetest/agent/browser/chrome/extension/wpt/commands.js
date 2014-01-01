@@ -29,6 +29,8 @@
 
  ******************************************************************************/
 
+var g_tabid = 0;
+
 goog.require('wpt.logging');
 goog.provide('wpt.commands');
 
@@ -81,7 +83,6 @@ function trim(stringToTrim) {
  *                           object.
  */
 wpt.commands.CommandRunner = function(tabId, chromeApi) {
-  this.tabId_ = tabId;
   this.chromeApi_ = chromeApi;
 };
 
@@ -95,7 +96,7 @@ wpt.commands.CommandRunner = function(tabId, chromeApi) {
  * @param {Object} commandObject
  */
 wpt.commands.CommandRunner.prototype.SendCommandToContentScript_ = function(
-    commandObject) {
+    commandObject, callback) {
 
   console.log('Delegate a command to the content script: ', commandObject);
 
@@ -103,7 +104,10 @@ wpt.commands.CommandRunner.prototype.SendCommandToContentScript_ = function(
               JSON.stringify(commandObject),
               ');'].join('');
   this.chromeApi_.tabs.executeScript(
-      this.tabId_, {'code': code}, function() {});
+      g_tabid, {'code': code}, function() {
+        if (callback != undefined)
+          callback();
+      });
 };
 
 /**
@@ -113,16 +117,22 @@ wpt.commands.CommandRunner.prototype.SendCommandToContentScript_ = function(
  * an exception.
  * @param {string} script
  */
-wpt.commands.CommandRunner.prototype.doExec = function(script) {
-  this.chromeApi_.tabs.executeScript(this.tabId_, {'code': script});
+wpt.commands.CommandRunner.prototype.doExec = function(script, callback) {
+  this.chromeApi_.tabs.executeScript(g_tabid, {'code': script}, function(results){
+    if (callback != undefined)
+      callback();
+  });
 };
 
 /**
  * Implement the navigate command.
  * @param {string} url
  */
-wpt.commands.CommandRunner.prototype.doNavigate = function(url) {
-  this.chromeApi_.tabs.update(this.tabId_, {'url': url});
+wpt.commands.CommandRunner.prototype.doNavigate = function(url, callback) {
+  this.chromeApi_.tabs.update(g_tabid, {'url': url}, function(tab){
+    if (callback != undefined)
+      callback();
+  });
 };
 
 /**
@@ -208,7 +218,7 @@ wpt.commands.CommandRunner.prototype.doBlockUsingRequestCallback_ =
 
   var requestFilter = {
     urls: [],
-    tabId: this.tabId_
+    tabId: g_tabid
   };
 
   this.chromeApi_.webRequest.onBeforeRequest.addListener(
@@ -255,12 +265,12 @@ chrome.webNavigation.onBeforeNavigate.addListener(function(details) {
  */
 wpt.commands.CommandRunner.prototype.doSetDOMElements = function() {
   if (wpt.commands.g_domElements.length > 0) {
-    if (goog.isNull(this.tabId_))
+    if (goog.isNull(g_tabid))
       throw ('It should not be posible to run the doSetDOMElements() method ' +
              'before we find the id of the tab in which pages are loaded.');
 
     chrome.tabs.sendRequest(
-        this.tabId_,
+        g_tabid,
         {'message': 'setDOMElements', name_values: wpt.commands.g_domElements},
         function(response) {});
     wpt.LOG.info('doSetDOMElements for :  ' + wpt.commands.g_domElements);
@@ -271,11 +281,11 @@ wpt.commands.CommandRunner.prototype.doSetDOMElements = function() {
  * Implement the click command.
  * @param {string} target The DOM element to click, in attribute'value form.
  */
-wpt.commands.CommandRunner.prototype.doClick = function(target) {
+wpt.commands.CommandRunner.prototype.doClick = function(target, callback) {
   this.SendCommandToContentScript_({
       'command': 'click',
       'target': target
-  });
+  }, callback);
 };
 
 /**
@@ -283,12 +293,12 @@ wpt.commands.CommandRunner.prototype.doClick = function(target) {
  * @param {string} target The DOM element to click, in attribute'value form.
  * @param {string} value The value to set.
  */
-wpt.commands.CommandRunner.prototype.doSetInnerHTML = function(target, value) {
+wpt.commands.CommandRunner.prototype.doSetInnerHTML = function(target, value, callback) {
   this.SendCommandToContentScript_({
       'command': 'setInnerHTML',
       'target': target,
       'value': value
-  });
+  }, callback);
 };
 
 /**
@@ -296,12 +306,12 @@ wpt.commands.CommandRunner.prototype.doSetInnerHTML = function(target, value) {
  * @param {string} target The DOM element to click, in attribute'value form.
  * @param {string} value The value to set.
  */
-wpt.commands.CommandRunner.prototype.doSetInnerText = function(target, value) {
+wpt.commands.CommandRunner.prototype.doSetInnerText = function(target, value, callback) {
   this.SendCommandToContentScript_({
       'command': 'setInnerText',
       'target': target,
       'value': value
-  });
+  }, callback);
 };
 
 /**
@@ -309,34 +319,40 @@ wpt.commands.CommandRunner.prototype.doSetInnerText = function(target, value) {
  * @param {string} target The DOM element to set, in attribute'value form.
  * @param {string} value The value to set the target to.
  */
-wpt.commands.CommandRunner.prototype.doSetValue = function(target, value) {
+wpt.commands.CommandRunner.prototype.doSetValue = function(target, value, callback) {
   this.SendCommandToContentScript_({
       'command': 'setValue',
       'target': target,
       'value': value
-  });
+  }, callback);
 };
 
 /**
  * Implement the submitForm command.
  * @param {string} target The DOM element to set, in attribute'value form.
  */
-wpt.commands.CommandRunner.prototype.doSubmitForm = function(target) {
+wpt.commands.CommandRunner.prototype.doSubmitForm = function(target, callback) {
   this.SendCommandToContentScript_({
       'command': 'submitForm',
       'target': target
-  });
+  }, callback);
 };
 
 /**
  * Implement the clearcache command.
  * @param {string} options
  */
-wpt.commands.CommandRunner.prototype.doClearCache = function(options) {
+wpt.commands.CommandRunner.prototype.doClearCache = function(options, callback) {
   if (this.chromeApi_['browsingData'] != undefined) {
-    this.chromeApi_.browsingData.removeCache({}, function() {});
+    this.chromeApi_.browsingData.removeCache({}, function() {
+      if (callback != undefined)
+        callback();
+    });
   } else if (this.chromeApi_.experimental['clear'] != undefined) {
-    this.chromeApi_.experimental.clear.cache(0, function() {});
+    this.chromeApi_.experimental.clear.cache(0, function() {
+      if (callback != undefined)
+        callback();
+    });
   }
 };
 
@@ -344,11 +360,29 @@ wpt.commands.CommandRunner.prototype.doClearCache = function(options) {
  * Implement the noscript command.
  */
 wpt.commands.CommandRunner.prototype.doNoScript = function() {
-  console.log("disabling javascript");
   this.chromeApi_.contentSettings.javascript.set({
     'primaryPattern': '<all_urls>',
     'setting': 'block'
   });
+};
+
+/**
+ * Implement the collectStats command.
+ */
+wpt.commands.CommandRunner.prototype.doCollectStats = function(callback) {
+  chrome.tabs.sendRequest( g_tabid, {'message': 'collectStats'},
+      function(response) {
+        if (callback != undefined)
+          callback();
+      });
+};
+
+wpt.commands.CommandRunner.prototype.doCheckResponsive = function(callback) {
+  chrome.tabs.sendRequest( g_tabid, {'message': 'checkResponsive'},
+      function(response) {
+        if (callback != undefined)
+          callback();
+      });
 };
 
 })());  // namespace

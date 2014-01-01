@@ -25,15 +25,15 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
-/*global describe:true, before:true, beforeEach:true, afterEach:true, it:true*/
 
-var sinon = require('sinon');
-var should = require('should');
+var devtools = require('devtools');
 var events = require('events');
 var http = require('http');
+var should = require('should');
+var sinon = require('sinon');
+var Stream = require('stream');
 var url = require('url');
 var util = require('util');
-var devtools = require('devtools');
 
 
 /**
@@ -86,6 +86,7 @@ describe('devtools small', function() {
     sandbox.stub(http, 'get', function(getUrl, callback) {
       should.equal(getUrl.href, url.parse(devtoolsUrl).href);
       callback(getResponse, callback);
+      return new Stream();
     });
     sandbox.stub(devtools, 'ProcessResponse',
         function(response, callback) {
@@ -101,5 +102,22 @@ describe('devtools small', function() {
     getResponse = '';
     myDevtools.connect.should.throwError();
     should.ok(connectDebuggerStub.calledOnce);
+  });
+
+  it('should call errback on HTTP errors', function() {
+    var fakeResponse = new Stream();
+    sandbox.stub(http, 'get', function() {
+      return fakeResponse;
+    });
+    var callbackSpy = sandbox.spy();
+    var errbackSpy = sandbox.spy();
+
+    var myDevtools = new devtools.DevTools('http://gaga');
+    myDevtools.connect(callbackSpy, errbackSpy);
+    fakeResponse.emit('error', new Error('test error'));
+
+    should.ok(callbackSpy.notCalled);
+    should.ok(errbackSpy.calledOnce);
+    should.equal('test error', errbackSpy.firstCall.args[0].message);
   });
 });
