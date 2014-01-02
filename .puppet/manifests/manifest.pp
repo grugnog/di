@@ -37,12 +37,17 @@ class {'apache': }
 class { 'php': }
 apache::module { ['expires', 'headers', 'rewrite']: }
 php::module { ['gd', 'mysql', 'xdebug']: }
-php::module { ['apc']:
-  module_prefix => "php-",
-}
 php::pecl::module { "xhprof":
   use_package => no,
   preferred_state => "beta",
+}
+php::conf { 'xhprof.ini':
+  path     => '/etc/php5/mods-available/xhprof.ini',
+  content => 'extension=xhprof.so',
+  before => Exec["enable-xhprof"],
+}
+exec { "enable-xhprof":
+  command => "php5enmod xhprof",
 }
 file { '000-default':
   ensure  => 'absent',
@@ -50,17 +55,14 @@ file { '000-default':
   require => Package['apache'],
   notify  => $apache::manage_service_autorestart,
 }
-apache::vhost { 'drupal':
-  ip_addr => '127.0.0.2',
-  docroot  => '/home/drupal/drupal',
+apache::vhost { '127.0.0.2':
+  docroot => '/home/drupal/drupal',
+  template => 'apache_vhost.conf',
   subscribe => Network_config['lo'],
 }
 file { "apache_ports.conf":
   ensure  => 'present',
   path    => "${apache::config_dir}/ports.conf",
-  mode    => $apache::config_file_mode,
-  owner   => $apache::config_file_owner,
-  group   => $apache::config_file_group,
   require => Package['apache'],
   notify  => $apache::manage_service_autorestart,
   content => template('apache_ports.conf'),
@@ -76,9 +78,9 @@ percona::rights {'drupal@localhost/drupal':
 
 # WPT server specific
 class { 'nginx': }
-nginx::resource::vhost { '127.0.0.1':
-  listen_ip => '127.0.0.1',
-  www_root => '/home/drupal/webpagetest/www/webpagetest',
+nginx::vhost { '127.0.0.1':
+  docroot => '/home/drupal/webpagetest/www',
+  template => 'wpt_vhost.conf',
   subscribe => Network_config['lo:0'],
 }
 file { 'default':
