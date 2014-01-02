@@ -36,7 +36,7 @@ Class['percona::repo::apt'] -> Class['percona::install']
 class {'apache': }
 class { 'php': }
 apache::module { ['expires', 'headers', 'rewrite']: }
-php::module { ['gd', 'mysql', 'xdebug']: }
+php::module { ['gd', 'mysql', 'xdebug', 'json']: }
 php::pecl::module { "xhprof":
   use_package => no,
   preferred_state => "beta",
@@ -48,6 +48,10 @@ php::conf { 'xhprof.ini':
 }
 exec { "enable-xhprof":
   command => "php5enmod xhprof",
+}
+php::conf { 'di.ini':
+  path     => '/etc/php5/apache2/conf.d/50-di.ini',
+  template => 'di.ini',
 }
 file { '000-default':
   ensure  => 'absent',
