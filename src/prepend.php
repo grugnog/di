@@ -29,6 +29,9 @@ function __cgroups_metrics($original = array()) {
   return $results;
 }
 
-$__cgroups_stats = __cgroups_metrics();
+// Include the Apache unique ID as a header, so that we can line up the requests and responses later.
+header('Unique-ID: ' . $_SERVER['UNIQUE_ID']);
 
+// Initialize cgroups and xhprof.
+$__cgroups_stats = __cgroups_metrics();
 xhprof_enable(XHPROF_FLAGS_CPU + XHPROF_FLAGS_MEMORY);

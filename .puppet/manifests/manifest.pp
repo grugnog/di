@@ -35,7 +35,7 @@ Class['apt'] -> Class['percona']
 Class['percona::repo::apt'] -> Class['percona::install']
 class {'apache': }
 class { 'php': }
-apache::module { ['expires', 'headers', 'rewrite']: }
+apache::module { ['expires', 'headers', 'rewrite', 'unique_id']: }
 php::module { ['gd', 'mysql', 'xdebug', 'json']: }
 php::pecl::module { "xhprof":
   use_package => no,
