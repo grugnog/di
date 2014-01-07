@@ -119,16 +119,26 @@ package { 'ipfw3-utils':
   ensure => present,
   require => Apt::Ppa['ppa:kai-mast/misc'],
 }
-exec { 'ipfw':
+exec { 'ipfw-suexec':
   command => '/bin/chmod u+s /usr/bin/ipfw',
   require => Package['ipfw3-utils'],
+}
+file { 'ipfw.rules':
+  ensure  => 'present',
+  path    => '/etc/udev/rules.d/99-ipfw.rules',
+  require => Package['ipfw3-utils'],
+  content => template('ipfw.rules'),
+}
+exec { 'udev-reload':
+  command => 'udevadm trigger --action=change',
+  subscribe => File['ipfw.rules'],
 }
 package { 'xvfb':
   ensure => present,
 }
 file { 'xvfb.conf':
   ensure  => 'present',
-  path    => "/etc/init/xvfb.conf",
+  path    => '/etc/init/xvfb.conf',
   require => Package['xvfb'],
   content => template('xvfb.conf'),
 }

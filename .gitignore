@@ -5,3 +5,12 @@
 .gitconfig
 .profile
 .ssh
+webpagetest/www/results/*
+webpagetest/www/work/jobs/*
+webpagetest/www/work/video/*
+webpagetest/www/logs/*
+webpagetest/www/tmp/*
+.lesshst
+.mysql_history
+.drush/cache
+.composer
