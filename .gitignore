@@ -14,3 +14,7 @@ webpagetest/www/tmp/*
 .mysql_history
 .drush/cache
 .composer
+.config
+.local
+.pki
+
